@@ -1,0 +1,62 @@
+<!-- Merge into the MANAGER ossec.conf; do not replace existing configuration.
+     These rule IDs are placeholders: agree actual decoder/rule contracts with M1.
+     Scripts execute on the endpoint producing the alert (location=local).
+     The freeze worker owns its deadline; do not configure Wazuh timeout for freeze.
+     Isolation has explicit analyst undo; kill cannot be undone. -->
+<command>
+  <name>ai_rdr_freeze</name>
+  <executable>ai_rdr_freeze.py</executable>
+  <timeout_allowed>no</timeout_allowed>
+</command>
+<command>
+  <name>ai_rdr_kill</name>
+  <executable>ai_rdr_kill.py</executable>
+  <timeout_allowed>no</timeout_allowed>
+</command>
+<command>
+  <name>ai_rdr_isolate</name>
+  <executable>ai_rdr_isolate.py</executable>
+  <timeout_allowed>yes</timeout_allowed>
+</command>
+<command>
+  <name>ai_rdr_block_ip</name>
+  <executable>ai_rdr_block_ip.py</executable>
+  <timeout_allowed>yes</timeout_allowed>
+</command>
+<command>
+  <name>ai_rdr_disable_user</name>
+  <executable>ai_rdr_disable_user.py</executable>
+  <timeout_allowed>yes</timeout_allowed>
+</command>
+<active-response>
+  <disabled>no</disabled>
+  <command>ai_rdr_freeze</command>
+  <location>local</location>
+  <rules_id>100100</rules_id>
+</active-response>
+<active-response>
+  <disabled>no</disabled>
+  <command>ai_rdr_kill</command>
+  <location>local</location>
+  <rules_id>100101</rules_id>
+</active-response>
+<active-response>
+  <disabled>no</disabled>
+  <command>ai_rdr_isolate</command>
+  <location>local</location>
+  <rules_id>100102</rules_id>
+</active-response>
+<active-response>
+  <disabled>no</disabled>
+  <command>ai_rdr_block_ip</command>
+  <location>local</location>
+  <rules_id>100103</rules_id>
+  <timeout>300</timeout>
+</active-response>
+<active-response>
+  <disabled>no</disabled>
+  <command>ai_rdr_disable_user</command>
+  <location>local</location>
+  <rules_id>100104</rules_id>
+  <timeout>600</timeout>
+</active-response>

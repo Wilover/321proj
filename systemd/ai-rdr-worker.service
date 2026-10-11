@@ -1,0 +1,14 @@
+[Unit]
+Description=AI-RDR verification deadline and recovery worker
+After=wazuh-agent.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /var/ossec/active-response/bin/ai_rdr_response.py worker
+Restart=always
+RestartSec=1
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

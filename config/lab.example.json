@@ -1,0 +1,12 @@
+{
+  "manager_addresses": ["192.168.10.10"],
+  "manager_ports": [1514],
+  "verification_seconds": 3,
+  "timeout_policy": "thaw",
+  "minimum_process_uid": 1000,
+  "critical_asset": false,
+  "protected_processes": ["sshd", "systemd", "ai_rdr_response"],
+  "protected_users": ["root", "wazuh", "ai-rdr"],
+  "state_dir": "/var/lib/ai-rdr",
+  "audit_log": "/var/log/ai-rdr/response.jsonl"
+}
