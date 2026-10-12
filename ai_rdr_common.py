@@ -1,6 +1,5 @@
 """Linux response runtime: serialized state, durable intent, process identities."""
 import contextlib
-import datetime
 import fcntl
 import ipaddress
 import json
@@ -8,8 +7,9 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import tempfile
 import time
+
+from ai_rdr_aicm import CaseStore
 
 
 class Runtime:
@@ -20,6 +20,15 @@ class Runtime:
         self.config = config
         self.directory = Path(config.get('state_dir', '/var/lib/ai-rdr'))
         self.log = Path(config.get('audit_log', '/var/log/ai-rdr/response.jsonl'))
+        self._store = None
+        self.actor = {'type': 'service', 'id': 'arm:' + config.get('agent_id', 'local')}
+        self.request_id = None
+
+    @property
+    def store(self):
+        if self._store is None:
+            self._store = CaseStore(self.directory / 'aicm.sqlite3')
+        return self._store
 
     def require_root(self):
         if os.geteuid() != 0:
@@ -30,37 +39,25 @@ class Runtime:
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         with (self.directory / 'response.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            path = self.directory / 'state.json'
-            # Corrupt state must fail closed, never masquerade as empty state.
-            state = json.loads(path.read_text()) if path.exists() else {'resources': {}, 'cases': {}}
+            state = self.store.load_state()
+            if state is None:
+                path = self.directory / 'state.json'
+                # One-time migration. Preserve the original JSON as a recovery archive.
+                state = json.loads(path.read_text()) if path.exists() else {'resources': {}, 'cases': {}}
+                if path.exists():
+                    self.save(state)
             yield state
 
     def save(self, state):
-        fd, name = tempfile.mkstemp(dir=self.directory, prefix='state.')
-        try:
-            with os.fdopen(fd, 'w') as stream:
-                json.dump(state, stream, sort_keys=True)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(name, self.directory / 'state.json')
-            directory_fd = os.open(self.directory, os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+        self.store.save_state(state, actor=self.actor, request_id=self.request_id)
 
     def audit(self, action, case_id, status, **details):
-        self.log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        event = {'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                 'action': action, 'case_id': case_id, 'status': status, **details}
-        fd = os.open(self.log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            os.write(fd, (json.dumps(event, sort_keys=True) + '\n').encode())
-        finally:
-            os.close(fd)
+        operation_id = details.pop('operation_id', None)
+        outcome = 'failure' if status in ('FAILED', 'PARTIAL', 'REJECTED', 'STALE_BOOT') else (
+            'unknown' if status == 'REVIEW_REQUIRED' else 'success')
+        self.store.append_event(case_id, 'response.' + action, actor=self.actor,
+                                request_id=self.request_id, operation_id=operation_id,
+                                outcome=outcome, details={'result': status, **details})
 
     def run(self, args, check=True):
         return subprocess.run(args, check=check, capture_output=True, text=True, timeout=2)

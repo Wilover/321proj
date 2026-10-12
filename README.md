@@ -1,8 +1,13 @@
-# AI-RDR — M5 incident response
+# AI-RDR — M5 incident response and AICM
 
 Corrected implementation based on the supplied example. The response actions are
 shared by a Wazuh adapter and a durable freeze/verify state machine. This is lab
 code, not a claim of production readiness or validated sub-second containment.
+
+AICM now stores incident cases, alerts, evidence references, response operations
+and an append-only audit trail in SQLite. See [AICM usage](docs/aicm-usage.md) for
+the case CLI, M6 integration contract and migration details, and
+[design research](docs/aicm-research.md) for the source comparisons.
 
 ## Development and tests
 
@@ -42,12 +47,16 @@ only harmless `sleep` child processes they create. They do not require root.
   restores original lock/expiry metadata. It never terminates existing sessions
   or stores password hashes. Session termination would be a separate irreversible
   policy and is deliberately excluded.
-- State is atomic, fsynced and serialized with a file lock. Corrupt state fails
-  closed. Failed firewall mutations retain intent for worker reconciliation.
+- ARM snapshots, response projections, transition audits and outbox entries commit
+  atomically in SQLite with durable sync, serialized by the endpoint file lock.
+  Corrupt state fails closed. Failed firewall mutations retain intent for worker
+  reconciliation. Existing JSON state is imported once and retained as an archive.
 
 ## Detector contract — agree with M1, M2, M3 and M6
 
-Wazuh `parameters.alert.data` must contain `case_id`. Process actions require:
+Wazuh `parameters.alert.data` should contain an incident `case_id`. If absent,
+AICM derives a UUID from immutable process identity or the source alert identity.
+Supply an explicit shared Case ID to group independent process roots. Process actions require:
 
 ```json
 {
@@ -74,10 +83,12 @@ Do not expose its input as a public endpoint. Process identity must be captured 
 event collection time; guessing the current identity for a delayed PID is unsafe.
 New attributed evidence can upgrade an already frozen case.
 
-Block requires `src_ip` (IPv4 or IPv6), disable requires `username`. A single case
-is bound to one root process in this candidate implementation. M6 must allocate
-distinct action keys/subcases if a case contains multiple independently targeted
-process roots. Scores in `[0.60, 0.90)` select the candidate freeze path; these are
+Block requires `src_ip` (IPv4 or IPv6), disable requires `username`. Each process
+root receives its own deterministic operation UUID; a case may contain several
+operations. Wazuh alerts should also carry `id`, `agent.id`, and a timezone-aware
+`timestamp`, used to deduplicate and retain source timing. An alert with an ID but
+no timestamp is rejected. Legacy alerts without IDs remain actionable, with an
+explicit `alert_recorded=false` entry. Scores in `[0.60, 0.90)` select the candidate freeze path; these are
 experimental thresholds. A high score alone does not authorize irreversible kill.
 Decoy evidence may select the kill path without waiting for verification timeout.
 Independent isolation can execute directly from a high-confidence Wazuh rule.
@@ -85,7 +96,7 @@ Independent isolation can execute directly from a high-confidence Wazuh rule.
 ## Ubuntu/Wazuh lab deployment
 
 Use a disposable endpoint VM and snapshot. Replace the example manager address
-and configure whether the endpoint is critical. Keep config and scripts root-owned
+and set `agent_id` to this endpoint's Wazuh ID; configure whether it is critical. Keep config and scripts root-owned
 and nonwritable by monitored users; state must be root-only. Reserve `AI_RDR_*`
 chains exclusively for this application, and do not mix firewall backends.
 
@@ -122,6 +133,9 @@ sudo python3 /var/ossec/active-response/bin/ai_rdr_response.py thaw CASE-001 --r
 sudo python3 /var/ossec/active-response/bin/ai_rdr_response.py undo CASE-001 --reason "Incident resolved"
 ```
 
+For a case with several active process roots, append `--operation <operation-id>`
+to `approve` or `thaw`. Inspect IDs through `ai_rdr_case.py show CASE-001`.
+
 `approve` performs isolation and termination. `thaw` resumes only processes this
 case stopped. `undo` releases reversible firewall/account leases; it cannot restore
 terminated processes and does not resume frozen processes.
@@ -155,8 +169,10 @@ on the critical path. Root compromise is outside this module's protection bounda
 
 ## Evaluation
 
-Audit JSONL records UTC timestamps, case/action/status, freeze/action elapsed time,
-and thaw duration. These are local action timings, not end-to-end attack latency.
+The SQLite audit records UTC timestamps, stable event/request/operation IDs, actors,
+case sequences, case changes and local action timings. `ai_rdr_case.py export` emits
+a JSON report. The old `audit_log` setting is retained for compatibility but no
+longer receives writes. These are local action timings, not end-to-end attack latency.
 M6 must correlate attack/decoy time, alert time, effective-action time and damage
 counters. Use p50/p95/p99, deadline misses, containment/undo success, benign
 disruption, files/bytes modified, and descendant escape rate. Compare immediate

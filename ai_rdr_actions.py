@@ -159,7 +159,7 @@ class Actions:
                 record['status'] = 'APPLIED'
             self.r.save(state)
 
-    def kill(self, identities, case_id):
+    def kill(self, identities, case_id, operation_id=None):
         started = time.monotonic()
         errors = []
         for identity in reversed(identities):
@@ -172,6 +172,7 @@ class Actions:
             except Exception as exc:
                 errors.append({'pid': identity['pid'], 'error': str(exc)})
         self.r.audit('kill', case_id, 'PARTIAL' if errors else 'SUCCESS', errors=errors,
-                     reversible=False, elapsed_ms=(time.monotonic() - started) * 1000)
+                     operation_id=operation_id, reversible=False,
+                     elapsed_ms=(time.monotonic() - started) * 1000)
         if errors:
             raise RuntimeError('Process termination incomplete')
