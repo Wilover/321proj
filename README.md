@@ -95,6 +95,9 @@ Independent isolation can execute directly from a high-confidence Wazuh rule.
 
 ## Ubuntu/Wazuh lab deployment
 
+For the full file-location map, configuration values, hardcoded limits, manager
+setup and staged checks, follow [Ubuntu deployment](docs/ubuntu-deployment.md).
+
 Use a disposable endpoint VM and snapshot. Replace the example manager address
 and set `agent_id` to this endpoint's Wazuh ID; configure whether it is critical. Keep config and scripts root-owned
 and nonwritable by monitored users; state must be root-only. Reserve `AI_RDR_*`
