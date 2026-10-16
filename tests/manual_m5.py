@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive M5 milestone demonstrations; every observation is saved locally."""
+"""Interactive M5 task demonstrations; every observation is saved locally."""
 import argparse
 import copy
 import datetime as dt
@@ -34,9 +34,9 @@ def require(condition, message):
 
 
 class Session:
-    def __init__(self, folder, milestone, interactive):
+    def __init__(self, folder, task, interactive, real_process=False):
         folder.mkdir(parents=True, exist_ok=False)
-        self.folder, self.milestone, self.interactive = folder, milestone, interactive
+        self.folder, self.task, self.interactive = folder, task, interactive
         self.stream = (folder / 'terminal.txt').open('w')
         self.results = []
         self.started = utc_now()
@@ -47,10 +47,9 @@ class Session:
             self.dirty = bool(status.stdout) if status.returncode == 0 else None
         except FileNotFoundError:
             self.revision, self.dirty = 'git unavailable', None
-        self.mode = 'real-disposable-linux-children' if milestone == 'kernel' else 'simulated-host-real-m5-and-sqlite'
-        self.say(f'M5 {milestone} | {self.mode} | {self.started}')
+        self.mode = 'real-disposable-linux-children' if real_process else 'simulated-host-real-m5-and-sqlite'
+        self.say(f'M5 {task} | {self.mode} | {self.started}')
         self.say(f'Source revision: {self.revision}; modified/untracked source: {self.dirty}')
-        self.say('This is a current test session, not evidence that four calendar weeks have elapsed.')
 
     def say(self, message):
         print(message, flush=True)
@@ -79,12 +78,12 @@ class Session:
             for case in store.list_cases(limit=1000):
                 name = 'case-' + str(uuid.uuid5(uuid.NAMESPACE_URL, case['case_id'])) + '.json'
                 (self.folder / name).write_text(json.dumps(store.export_case(case['case_id']), indent=2))
-        summary = {'schema_version': 1, 'milestone': self.milestone, 'mode': self.mode,
+        summary = {'schema_version': 2, 'task': self.task, 'mode': self.mode,
                    'started_at': self.started, 'finished_at': utc_now(),
                    'source_revision': self.revision, 'source_modified': self.dirty,
                    'results': self.results, 'passed': bool(self.results) and all(x['passed'] for x in self.results)}
         (self.folder / 'results.json').write_text(json.dumps(summary, indent=2))
-        rows = ['# M5 manual test session', '', f'Milestone: {self.milestone}',
+        rows = ['# M5 manual test session', '', f'Task: {self.task}',
                 f'Mode: {self.mode}', f'Actual start: {self.started}',
                 f'Source: {self.revision} (modified: {self.dirty})', '',
                 '| Step | Result | Local step duration (ms) |', '|---|---|---|']
@@ -129,107 +128,111 @@ class Demo:
             result['risk_score'] = .75
         return result
 
-    def week1(self):
+    def playbooks(self):
         def isolate():
             before = copy.deepcopy(self.r.host.tables)
-            self.send('isolate', 'W1-ISOLATE')
+            self.send('isolate', 'PLAYBOOKS-ISOLATE')
             table = self.r.host.tables['iptables']
             require(['-s', '192.0.2.63', '-p', 'tcp', '--dport', '22', '-j', 'ACCEPT'] in table['AI_RDR_ISO_IN'], 'Scoped controller SSH exception absent')
             require(self.r.host.tables['ip6tables']['AI_RDR_ISO_OUT'][-1] == ['-j', 'DROP'], 'IPv6 output drop absent')
-            self.send('isolate', 'W1-ISOLATE', command='delete')
+            self.send('isolate', 'PLAYBOOKS-ISOLATE', command='delete')
             require(self.r.host.tables == before, 'Isolation undo changed pre-existing rules')
             return {'isolation': 'applied and removed', 'unrelated_rules': 'preserved', 'ssh': 'scoped rule installed, connectivity not tested'}
         def kill():
             data = self.process_data(4101, decoy=True)
-            self.send('kill', 'W1-KILL', **data)
+            self.send('kill', 'PLAYBOOKS-KILL', **data)
             require(self.r.identity(4101)['state'] == 'Z', 'Simulated process still running')
-            self.send('isolate', 'W1-KILL', command='delete')
+            self.send('isolate', 'PLAYBOOKS-KILL', command='delete')
             return {'pid': 4101, 'observed_state': 'Z', 'kill': 'irreversible; no process resurrection attempted'}
         def block():
-            self.send('block', 'W1-BLOCK', src_ip='192.0.2.99')
+            self.send('block', 'PLAYBOOKS-BLOCK', src_ip='192.0.2.99')
             require(['-s', '192.0.2.99', '-j', 'DROP'] in self.r.host.tables['iptables']['AI_RDR_BLOCK_IN'], 'Input block absent')
             require(['-d', '192.0.2.99', '-j', 'DROP'] in self.r.host.tables['iptables']['AI_RDR_BLOCK_OUT'], 'Output block absent')
-            self.send('block', 'W1-BLOCK', command='delete', src_ip='192.0.2.99')
+            self.send('block', 'PLAYBOOKS-BLOCK', command='delete', src_ip='192.0.2.99')
             require(not self.r.host.tables['iptables']['AI_RDR_BLOCK_IN'], 'Block rule survived undo')
             return {'address': '192.0.2.99', 'directions': ['INPUT', 'OUTPUT'], 'undo': 'rules removed'}
         def disable():
             before = self.r.account_snapshot('labuser')
-            self.send('disable', 'W1-ACCOUNT', username='labuser')
+            self.send('disable', 'PLAYBOOKS-ACCOUNT', username='labuser')
             require(self.r.account_snapshot('labuser')['locked'], 'Account not locked')
             require(self.r.account_snapshot('labuser')['expiry'] == 1, 'Account not expired')
-            self.send('disable', 'W1-ACCOUNT', command='delete', username='labuser')
+            self.send('disable', 'PLAYBOOKS-ACCOUNT', command='delete', username='labuser')
             require(self.r.account_snapshot('labuser') == before, 'Account metadata not restored')
             return {'account': 'labuser', 'lock_and_expiry': 'applied/restored', 'real_login_test': 'NOT RUN'}
         for title, action in [('Isolate and undo', isolate), ('Terminate attributed decoy process', kill),
                               ('Block IP and undo', block), ('Restrict account and restore metadata', disable)]:
             self.s.step(title, action)
 
-    def week2(self):
+        self._safeguards('playbooks')
+
+    def freeze(self):
         def freeze():
             data = self.process_data(4201)
             self.r.host.process(4202, ppid=4201)
-            self.send('freeze', 'W2-CANDIDATE', **data)
+            self.send('freeze', 'FREEZE-CANDIDATE', **data)
             require(all(self.r.identity(p)['state'] == 'T' for p in (4201, 4202)), 'Tree not stopped')
             return {'parent': 'T', 'child': 'T', 'verification': 'pending'}
         def timeout():
             with self.r.transaction() as state:
-                record = next(x for x in state['cases'].values() if x['case_id'] == 'W2-CANDIDATE')
+                record = next(x for x in state['cases'].values() if x['case_id'] == 'FREEZE-CANDIDATE')
                 record['deadline'] = 0  # Explicit logical-time injection, not a latency measurement.
                 self.r.save(state)
                 Workflow(self.r).tick(state)
-            case = self.r.store.get_case('W2-CANDIDATE')
+            case = self.r.store.get_case('FREEZE-CANDIDATE')
             require(all(self.r.identity(p)['state'] == 'S' for p in (4201, 4202)), 'Tree did not resume')
             require(case['disposition'] == 'undetermined', 'Timeout falsely marked benign')
             return {'clock': 'deadline explicitly injected as expired', 'processes': 'resumed', 'verdict': case['disposition']}
         def automatic():
             data = self.process_data(4203, decoy=True)
-            self.send('kill', 'W2-DECOY', response_mode='alert_only', **data)
+            self.send('kill', 'FREEZE-DECOY', response_mode='alert_only', **data)
             require(self.r.identity(4203)['state'] == 'Z', 'Independent decoy path was blocked')
-            require(not any(x['event_type'] == 'response.approve' for x in self.r.store.timeline('W2-DECOY')), 'Unexpected approval')
-            self.send('isolate', 'W2-DECOY', command='delete')
+            require(not any(x['event_type'] == 'response.approve' for x in self.r.store.timeline('FREEZE-DECOY')), 'Unexpected approval')
+            self.send('isolate', 'FREEZE-DECOY', command='delete')
             return {'ML_mode': 'alert_only', 'independent_decoy': 'confirmed', 'automatic_kill': 'observed without approval'}
         def approval():
             self.r.config['require_approval'] = True
-            self.send('kill', 'W2-APPROVAL', **self.process_data(4204, decoy=True))
+            self.send('kill', 'FREEZE-APPROVAL', **self.process_data(4204, decoy=True))
             require(self.r.identity(4204)['state'] == 'T', 'Killed before extra approval')
             return {'additional_gate': 'enabled', 'operation': 'REVIEW', 'process': 'still stopped'}
         def approve():
             self.r.actor = {'type': 'user', 'id': 'SIMULATED-ANALYST'}
             with self.r.transaction() as state:
                 workflow = Workflow(self.r)
-                key = workflow.operation_key(state, 'W2-APPROVAL')
+                key = workflow.operation_key(state, 'FREEZE-APPROVAL')
                 state['cases'][key].update(analyst_approved=True, approval_reason='Manual demonstration approval')
                 self.r.save(state)
-                self.r.audit('approve', 'W2-APPROVAL', 'APPROVED', operation_id=key, reason='Manual demonstration approval')
-                workflow.contain(state, 'W2-APPROVAL', operation_id=key)
+                self.r.audit('approve', 'FREEZE-APPROVAL', 'APPROVED', operation_id=key, reason='Manual demonstration approval')
+                workflow.contain(state, 'FREEZE-APPROVAL', operation_id=key)
             require(self.r.identity(4204)['state'] == 'Z', 'Approval did not lead to termination')
-            self.send('isolate', 'W2-APPROVAL', command='delete')
+            self.send('isolate', 'FREEZE-APPROVAL', command='delete')
             return {'actor': 'SIMULATED-ANALYST', 'approved_result': 'KILLED'}
         for title, action in [('Freeze process tree', freeze), ('Verify inconclusive timeout and thaw', timeout),
                               ('Automatic attributed-decoy containment', automatic), ('Enable optional approval', approval),
                               ('Manually approve the waiting operation', approve)]:
             self.s.step(title, action)
 
-    def week3(self):
+        self._safeguards('freeze')
+
+    def aicm(self):
         store = self.r.store
         actor = {'type': 'user', 'id': 'SIMULATED-ANALYST'}
         def create():
-            case = store.create_case(actor=actor, title='M5 manual case demonstration', case_id='W3-CASE')
+            case = store.create_case(actor=actor, title='M5 manual case demonstration', case_id='AICM-CASE')
             store.update_case(case['case_id'], actor=actor, expected_version=1,
                               reason='Triage started', lifecycle='investigating', assignee='lab-analyst')
             return {'case_id': case['case_id'], 'version': 2, 'status': 'investigating'}
         def alerts():
             for event in ('SOURCE-1', 'SOURCE-2', 'SOURCE-1'):
-                store.attach_alert('W3-CASE', producer='synthetic-lab', agent_id='LAB-001',
+                store.attach_alert('AICM-CASE', producer='synthetic-lab', agent_id='LAB-001',
                                    source_id=event, occurred_at=self.s.started,
                                    metadata={'risk_score': .75, 'api_token': 'DEMO-NOT-A-CREDENTIAL'}, actor=actor)
-            case = store.get_case('W3-CASE')
+            case = store.get_case('AICM-CASE')
             require(len(case['alerts']) == 2, 'Duplicate source event created another alert')
             require(all(x['api_token'] == '[REDACTED]' for x in case['alerts']), 'Sensitive metadata not redacted')
             return {'deliveries': 3, 'stored_alerts': 2, 'dummy_secret_field': '[REDACTED]'}
         def audit():
             try:
-                store.update_case('W3-CASE', actor=actor, expected_version=1, reason='Intentional stale edit', severity='high')
+                store.update_case('AICM-CASE', actor=actor, expected_version=1, reason='Intentional stale edit', severity='high')
             except Conflict as exc:
                 self.s.say('EXPECTED REJECTION: ' + str(exc))
             else:
@@ -241,38 +244,40 @@ class Demo:
                 self.s.say('EXPECTED REJECTION: ' + str(exc))
             else:
                 raise AssertionError('Audit deletion accepted')
-            events = store.timeline('W3-CASE')
+            events = store.timeline('AICM-CASE')
             for event in events:
                 self.s.say(f'AUDIT seq={event["case_sequence"]} type={event["event_type"]} actor={event["actor"]["id"]} outcome={event["outcome"]}')
             require([x['case_sequence'] for x in events] == list(range(1, len(events) + 1)), 'Audit sequence gap')
             return {'stale_edit': 'rejected and audited', 'SQL_audit_delete': 'rejected', 'events': len(events)}
         def close():
-            store.update_case('W3-CASE', actor=actor, expected_version=2, reason='Synthetic benign case resolved',
+            store.update_case('AICM-CASE', actor=actor, expected_version=2, reason='Synthetic benign case resolved',
                               lifecycle='resolved', disposition='benign')
-            store.update_case('W3-CASE', actor=actor, expected_version=3, reason='Lab review complete', lifecycle='closed')
+            store.update_case('AICM-CASE', actor=actor, expected_version=3, reason='Lab review complete', lifecycle='closed')
             backup = self.s.folder / 'backup.sqlite3'
             store.backup(backup)
             restored = CaseStore(backup)
-            require(restored.timeline('W3-CASE') == store.timeline('W3-CASE'), 'Backup lost audit events')
+            require(restored.timeline('AICM-CASE') == store.timeline('AICM-CASE'), 'Backup lost audit events')
             return {'lifecycle': 'closed', 'disposition': 'benign', 'backup_history': 'verified equal'}
         for title, action in [('Create and assign incident', create), ('Attach alerts and suppress duplicate', alerts),
                               ('Inspect and protect audit history', audit), ('Resolve, close and back up case', close)]:
             self.s.step(title, action)
 
-    def week4(self):
+        self._safeguards('aicm')
+
+    def _safeguards(self, task):
         def ml_only():
             before = len(self.r.host.signals), len(self.r.host.calls)
-            case = self.send('freeze', 'W4-ML', response_mode='alert_only', **self.process_data(4401))
+            case = self.send('freeze', 'FREEZE-ML', response_mode='alert_only', **self.process_data(4401))
             require(not case['operations'], 'ML-only alert executed a response')
             require(before == (len(self.r.host.signals), len(self.r.host.calls)), 'Host mutated')
             return {'ML_case': 'recorded', 'host_actions': 0, 'policy': 'alert_only enforced'}
         def reuse():
-            self.send('freeze', 'W4-PID', **self.process_data(4402))
+            self.send('freeze', 'FREEZE-PID', **self.process_data(4402))
             before = len(self.r.host.signals)
             self.r.host.processes[4402]['start_ticks'] += 1
             with self.r.transaction() as state:
                 try:
-                    Workflow(self.r).thaw(state, 'W4-PID', 'Intentional PID-reuse check')
+                    Workflow(self.r).thaw(state, 'FREEZE-PID', 'Intentional PID-reuse check')
                 except RuntimeError as exc:
                     self.s.say('EXPECTED REJECTION: ' + str(exc))
                 else:
@@ -280,11 +285,11 @@ class Demo:
             require(len(self.r.host.signals) == before, 'Replacement process was signalled')
             return {'reused_pid': 4402, 'signal_to_replacement': False}
         def leases():
-            self.send('isolate', 'W4-OWNER-A')
-            self.send('isolate', 'W4-OWNER-B')
-            self.send('isolate', 'W4-OWNER-A', command='delete')
+            self.send('isolate', 'PLAYBOOKS-OWNER-A')
+            self.send('isolate', 'PLAYBOOKS-OWNER-B')
+            self.send('isolate', 'PLAYBOOKS-OWNER-A', command='delete')
             require('AI_RDR_ISO_IN' in self.r.host.tables['iptables'], 'First owner removed shared isolation')
-            self.send('isolate', 'W4-OWNER-B', command='delete')
+            self.send('isolate', 'PLAYBOOKS-OWNER-B', command='delete')
             require('AI_RDR_ISO_IN' not in self.r.host.tables['iptables'], 'Last owner did not remove isolation')
             return {'owners': 2, 'first_release': 'isolation retained', 'last_release': 'isolation removed'}
         def delivery():
@@ -296,9 +301,13 @@ class Demo:
             require(event['event_id'] not in {x['event_id'] for x in self.r.store.pending_events()}, 'Acknowledgement not persisted')
             return {'event_id': event['event_id'], 'retry': 'deduplicated', 'transport': 'local method calls; no network',
                     'central_case_projection': 'NOT IMPLEMENTED; ingestion is history-only'}
-        for title, action in [('ML-only alert records without automatic response', ml_only),
-                              ('Reject changed process identity', reuse), ('Shared isolation ownership', leases),
-                              ('Retry delivery after a lost acknowledgement', delivery)]:
+        checks = {
+            'playbooks': [('Shared isolation ownership', leases)],
+            'freeze': [('ML-only alert records without automatic response', ml_only),
+                       ('Reject changed process identity', reuse)],
+            'aicm': [('Retry delivery after a lost acknowledgement', delivery)],
+        }
+        for title, action in checks[task]:
             self.s.step(title, action)
 
 
@@ -319,7 +328,7 @@ class ChildRuntime(Runtime):
         super().signal_identity(identity, sig)
 
 
-def kernel_demo(session):
+def real_process_demo(session):
     if os.geteuid() == 0:
         raise PermissionError('Run the disposable-child demonstration as a normal user, without sudo')
     runtime = ChildRuntime(session.folder / 'state', session.say)
@@ -360,29 +369,32 @@ def kernel_demo(session):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('milestone', choices=['week1', 'week2', 'week3', 'week4', 'kernel'])
+    parser.add_argument('task', choices=['playbooks', 'freeze', 'aicm'])
+    parser.add_argument('--real-process', action='store_true', help='Freeze task only: signal my own disposable Linux child')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--non-interactive', action='store_true', help='Run without Enter prompts; used by verification tests')
     args = parser.parse_args()
+    if args.real_process and args.task != 'freeze':
+        parser.error('--real-process is only supported for the freeze task')
     if not args.non_interactive and not sys.stdin.isatty():
         parser.error('Use an interactive terminal or pass --non-interactive explicitly')
-    folder = args.output or ROOT / 'artifacts' / 'manual-m5' / (dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + args.milestone + '-' + uuid.uuid4().hex[:6])
+    folder = args.output or ROOT / 'artifacts' / 'manual-m5' / (dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-' + args.task + '-' + uuid.uuid4().hex[:6])
     try:
-        session = Session(folder.resolve(), args.milestone, not args.non_interactive)
+        session = Session(folder.resolve(), args.task, not args.non_interactive, args.real_process)
     except FileExistsError:
         parser.error('Output folder already exists; choose a new folder to preserve earlier evidence')
     store = None
     code = 0
     try:
-        if args.milestone == 'kernel':
-            store = kernel_demo(session)
+        if args.real_process:
+            store = real_process_demo(session)
         else:
             demo = Demo(session)
             store = demo.r.store
             # Only account lookup is substituted; production account action and
             # restoration logic still execute against the in-memory OS model.
             with patch.object(Actions, 'account_snapshot', side_effect=demo.r.account_snapshot):
-                getattr(demo, args.milestone)()
+                getattr(demo, args.task)()
             (session.folder / 'simulated-host.json').write_text(json.dumps(demo.r.snapshot(), indent=2))
     except KeyboardInterrupt:
         session.say('INTERRUPTED: session is incomplete')
