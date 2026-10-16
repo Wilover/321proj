@@ -12,6 +12,7 @@ from ai_rdr_common import Runtime
 from ai_rdr_actions import Actions
 from freeze_verify_manager import Workflow
 from ai_rdr_aicm import encode, text_id, correlate_case
+from ai_rdr_policy import automatic_allowed
 
 
 def read_message(stream, timeout=5):
@@ -77,7 +78,8 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
     target = {'isolate': 'host', 'block': data.get('src_ip'),
               'disable': data.get('username'), 'freeze': data.get('pid'),
               'kill': data.get('pid')}[action]
-    if target is None:
+    permitted = command == 'delete' or automatic_allowed(data.get('response_mode'), data.get('evidence'), data)
+    if target is None and permitted:
         raise ValueError('Missing action target')
     if action == 'kill' and command == 'delete':
         raise ValueError('Kill is irreversible')
@@ -101,6 +103,7 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                    metadata={'rule': alert.get('rule', {}),
                                              'risk_score': data.get('risk_score'),
                                              'model_version': data.get('model_version'),
+                                             'response_mode': data.get('response_mode'),
                                              'pid': data.get('pid'), 'start_ticks': data.get('start_ticks'),
                                              'boot_id': data.get('boot_id'), 'evidence': data.get('evidence')},
                                    actor=runtime.actor, request_id=runtime.request_id)
@@ -110,6 +113,13 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
             evidence_id=str(uuid.uuid5(uuid.NAMESPACE_URL, encode([case_id, agent_id, evidence['event_id']]))),
             kind=evidence['type'], reference='wazuh:' + agent_id + ':' + str(evidence['event_id']),
             metadata=evidence, actor=runtime.actor)
+    if not permitted:
+        runtime.store.append_event(case_id, 'response.policy_blocked', actor=runtime.actor,
+                                   request_id=runtime.request_id, operation_id=operation_id,
+                                   phase='rejected', outcome='unknown',
+                                   details={'action': action, 'reason': 'ml_alert_only',
+                                            'response_mode': data['response_mode']})
+        return
     with runtime.transaction() as state:
         if action in ('freeze', 'kill') and case_id in state['cases']:
             # Existing one-root cases retain their operation and lease identifiers.
@@ -121,7 +131,9 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                             'agent_id': agent_id, 'alert_recorded': source_id is not None})
         state['policy'] = {'version': runtime.config.get('policy_version', 'candidate-v1'),
                            'verification_seconds': runtime.config.get('verification_seconds'),
-                           'timeout_policy': runtime.config.get('timeout_policy')}
+                           'timeout_policy': runtime.config.get('timeout_policy'),
+                           'require_approval': runtime.config.get('require_approval', False),
+                           'critical_asset': runtime.config.get('critical_asset', False)}
         workflow = Workflow(runtime)
         runtime.request_started = True
         if action in ('isolate', 'block', 'disable'):
@@ -141,11 +153,9 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                 if not workflow.confirmed(candidate):
                     raise ValueError('Kill requires positive evidence or prior analyst approval')
             workflow.freeze(state, case_id, int(target), data['start_ticks'], data['boot_id'],
-                            data['risk_score'], data.get('evidence'), operation_id=operation_id)
-            if action == 'kill':
-                workflow.contain(state, case_id, operation_id=operation_id)
-            else:
-                workflow.tick(state)
+                            data.get('risk_score'), data.get('evidence'), operation_id=operation_id,
+                            response_mode=data.get('response_mode'))
+            workflow.tick(state)
 
 
 def main(default_action=None):

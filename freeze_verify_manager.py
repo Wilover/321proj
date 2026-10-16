@@ -4,6 +4,7 @@ import time
 
 from ai_rdr_actions import Actions
 from ai_rdr_aicm import text_id
+from ai_rdr_policy import attributed_decoy, automatic_allowed
 
 
 TERMINAL = {'THAWED', 'KILLED', 'FAILED', 'STALE_BOOT'}
@@ -18,11 +19,10 @@ class Workflow:
         # Evidence comes from the trusted detector contract, never file atime.
         evidence = record.get('evidence', {})
         root = record['root']
-        return (record.get('analyst_approved', False) or
-                (evidence.get('type') == 'decoy_write' and evidence.get('event_id')
-                 and evidence.get('pid') == root['pid']
-                 and evidence.get('start_ticks') == root['start_ticks']
-                 and evidence.get('boot_id') == root['boot_id']))
+        return record.get('analyst_approved', False) or attributed_decoy(evidence, root)
+
+    def approval_required(self):
+        return self.r.config.get('critical_asset', False) or self.r.config.get('require_approval', False)
 
     @staticmethod
     def operation_key(state, case_id, operation_id=None):
@@ -39,11 +39,14 @@ class Workflow:
             raise ValueError('Specify an operation ID for an incident with zero/multiple active process operations')
         return candidates[0]
 
-    def freeze(self, state, case_id, pid, start_ticks, boot_id, score, evidence=None, operation_id=None):
+    def freeze(self, state, case_id, pid, start_ticks, boot_id, score, evidence=None, operation_id=None,
+               response_mode=None):
         if not isinstance(case_id, str) or not case_id or len(case_id) > 128:
             raise ValueError('Explicit Case ID required')
         key = operation_id or case_id
         text_id(key, 'operation ID')
+        if not automatic_allowed(response_mode, evidence, {'pid': pid, 'start_ticks': start_ticks, 'boot_id': boot_id}):
+            raise PermissionError('ML alert_only does not authorise automatic freeze')
         if key in state['cases']:
             old = state['cases'][key]
             if old.get('case_id', key) != case_id:
@@ -65,9 +68,10 @@ class Workflow:
             raise ValueError('Protected process')
         record = {'case_id': case_id, 'operation_id': key,
                   'root': root, 'processes': [], 'status': 'PREPARING',
-                  'score': float(score), 'created_monotonic': time.monotonic(),
+                  'score': float(score) if score is not None else None,
+                  'response_mode': response_mode, 'created_monotonic': time.monotonic(),
                   'boot_id': self.r.boot_id(), 'evidence': evidence or {}}
-        if not 0.60 <= float(score) < 0.90 and not self.confirmed(record):
+        if not self.confirmed(record) and (score is None or not 0.60 <= float(score) < 0.90):
             raise ValueError('Outside candidate freeze range without confirming evidence')
         window = float(self.r.config['verification_seconds'])
         if not 0 < window <= 10:
@@ -158,8 +162,8 @@ class Workflow:
             return
         if record['status'] not in ('FROZEN', 'REVIEW', 'CONTAINING'):
             raise ValueError('Case is not eligible for containment')
-        if self.r.config.get('critical_asset', False) and not record.get('analyst_approved'):
-            raise ValueError('Critical asset requires explicit analyst approval')
+        if self.approval_required() and not record.get('analyst_approved'):
+            raise ValueError('Endpoint policy requires explicit analyst approval')
         if not self.confirmed(record):
             raise ValueError('Positive evidence or analyst approval required')
         record['status'] = 'CONTAINING'
@@ -186,10 +190,22 @@ class Workflow:
                 elif record['status'] in ('PREPARING', 'THAWING'):
                     self.thaw(state, case_id, record.get('thaw_reason', 'interrupted_freeze'), operation_id=key)
                 elif record['status'] == 'CONTAINING':
-                    self.contain(state, case_id, record.get('isolate_requested', True), operation_id=key)
-                elif self.confirmed(record) and (not self.r.config.get('critical_asset', False)
-                                                or record.get('analyst_approved')):
-                    self.contain(state, case_id, operation_id=key)
+                    if self.approval_required() and not record.get('analyst_approved'):
+                        record['status'] = 'REVIEW'
+                        self.r.save(state)
+                        self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
+                                     reason='approval_policy_changed_during_recovery')
+                    else:
+                        self.contain(state, case_id, record.get('isolate_requested', True), operation_id=key)
+                elif self.confirmed(record):
+                    if self.approval_required() and not record.get('analyst_approved'):
+                        if record['status'] != 'REVIEW':
+                            record['status'] = 'REVIEW'
+                            self.r.save(state)
+                            self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
+                                         reason='approval_policy')
+                    else:
+                        self.contain(state, case_id, operation_id=key)
                 elif time.monotonic() >= record['deadline'] and record['status'] != 'REVIEW':
                     if self.r.config['timeout_policy'] == 'thaw' and not self.confirmed(record):
                         self.thaw(state, case_id, 'inconclusive_timeout', operation_id=key)

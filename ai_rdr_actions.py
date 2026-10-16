@@ -13,10 +13,17 @@ class Actions:
 
     def firewall(self, kind, target, add):
         managers = [canonical_ip(x) for x in self.r.config.get('manager_addresses', [])]
+        controllers = [canonical_ip(x) for x in self.r.config.get('controller_addresses', [])]
         if not managers:
             raise ValueError('Configure manager_addresses before firewall response')
-        if kind == 'block' and target in managers:
-            raise ValueError('Cannot block a Wazuh manager')
+        ports = self.r.config.get('manager_ports', [1514])
+        ssh_port = self.r.config.get('controller_ssh_port', 22)
+        if (not isinstance(ports, list) or not ports or
+                any(type(port) is not int or not 1 <= port <= 65535 for port in ports) or
+                type(ssh_port) is not int or not 1 <= ssh_port <= 65535):
+            raise ValueError('Invalid management TCP port configuration')
+        if add and kind == 'block' and target in managers + controllers:
+            raise ValueError('Cannot block a management peer')
         for tool, version in [('iptables', 4), ('ip6tables', 6)]:
             if kind == 'block' and (':' in target) != (version == 6):
                 continue
@@ -27,12 +34,17 @@ class Actions:
                     rules = [['-i' if parent == 'INPUT' else '-o', 'lo', '-j', 'ACCEPT']]
                     for manager in managers:
                         if (':' in manager) == (version == 6):
-                            for port in self.r.config.get('manager_ports', [1514]):
-                                if not isinstance(port, int) or not 1 <= port <= 65535:
-                                    raise ValueError('Invalid manager port')
+                            for port in ports:
                                 rules.append([direction, manager, '-p', 'tcp',
                                               '--sport' if parent == 'INPUT' else '--dport',
                                               str(port), '-j', 'ACCEPT'])
+                    for controller in controllers:
+                        if (':' in controller) == (version == 6):
+                            # Inbound SSH and its outbound replies, restricted to
+                            # the named controller. No blanket established allow.
+                            rules.append([direction, controller, '-p', 'tcp',
+                                          '--dport' if parent == 'INPUT' else '--sport',
+                                          str(ssh_port), '-j', 'ACCEPT'])
                     rules.append(['-j', 'DROP'])
                     specifications.append((parent, chain, rules))
             else:
@@ -109,6 +121,9 @@ class Actions:
         started = time.monotonic()
         if kind == 'block':
             target = canonical_ip(target)
+            peers = self.r.config.get('manager_addresses', []) + self.r.config.get('controller_addresses', [])
+            if add and target in [canonical_ip(peer) for peer in peers]:
+                raise ValueError('Cannot block a management peer')
         key = f'{kind}:{target}'
         resources = state['resources']
         record = resources.get(key)

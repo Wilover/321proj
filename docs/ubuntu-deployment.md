@@ -4,6 +4,13 @@ This guide maps the current repository to an Ubuntu VM. It covers ARM, the
 freeze/verify worker and AICM. It does not install Wazuh itself, the M2 detector,
 M3 decoy monitoring or M6's dashboard/API. Install/enrol Wazuh with M1 first.
 
+For the current three-VM project, this remains a standalone endpoint-prototype
+guide. The existing server-side HTTP trigger and scoped SSH executor are a separate
+route: do not add the section 6 XML template alongside them and create a second
+automatic responder. See [integration review](m5-project-integration-review.md).
+For current VS Code checks without changing a VM's firewall/accounts, start with
+[manual milestones](manual-four-week-tests.md).
+
 Recommended initial layout: a **Wazuh manager VM** and a separate **Ubuntu 22.04
 or 24.04 monitored endpoint VM**. Run the responses on the endpoint being protected.
 Ubuntu's system Python is 3.10 on 22.04 and 3.12 on 24.04; both fit this code.
@@ -20,7 +27,7 @@ this cloud checkout does not install anything on your VM.
 | Repository file(s) | Destination | Machine / purpose |
 |---|---|---|
 | `ai_rdr_freeze.py`, `ai_rdr_kill.py`, `ai_rdr_isolate.py`, `ai_rdr_block_ip.py`, `ai_rdr_disable_user.py` | `/var/ossec/active-response/bin/` | Endpoint: five Wazuh executable entry points |
-| `ai_rdr_response.py`, `ai_rdr_actions.py`, `ai_rdr_common.py`, `ai_rdr_aicm.py`, `freeze_verify_manager.py` | Same directory as the entry points | Endpoint: imported shared modules and deadline worker; all five are required |
+| `ai_rdr_response.py`, `ai_rdr_actions.py`, `ai_rdr_common.py`, `ai_rdr_aicm.py`, `ai_rdr_policy.py`, `freeze_verify_manager.py` | Same directory as the entry points | Endpoint: imported shared modules and deadline worker; all six are required |
 | `ai_rdr_case.py` | Same directory | Endpoint: local case/timeline/export/backup CLI |
 | `config/lab.example.json` | Copy to `/etc/ai-rdr/config.json`, then edit | Endpoint: per-VM configuration |
 | `systemd/ai-rdr-worker.service` | `/etc/systemd/system/ai-rdr-worker.service` | Endpoint: deadline/recovery service |
@@ -49,14 +56,17 @@ Copy the example before editing; keep the repository example reusable.
 
 | Setting in `/etc/ai-rdr/config.json` | Current example | What to use on your VM |
 |---|---|---|
-| `manager_addresses` | `["192.168.10.10"]` | The actual manager IP address(es) that the endpoint connects to; literal IPv4/IPv6 addresses, no hostname, URL or CIDR. Include IPv6 if the agent uses it. Loopback addresses are rejected. |
+| `manager_addresses` | `["192.168.70.62"]` | The actual manager IP address(es) that the endpoint connects to; literal IPv4/IPv6 addresses, no hostname, URL or CIDR. Include IPv6 if the agent uses it. Loopback addresses are rejected. |
 | `manager_ports` | `[1514]` | Actual **TCP destination ports** used by this agent for manager communication. Default agent traffic is TCP 1514. Port 1515 is optional enrolment traffic, not a replacement for 1514. The code does not support UDP manager exceptions. |
+| `controller_addresses` | `["192.168.70.63"]` | Only these controller IPs may initiate SSH to the isolated endpoint. Use literal IPs; an empty list allows no remote SSH exception. |
+| `controller_ssh_port` | `22` | The target's SSH listening port; inbound controller traffic and outbound replies are explicitly allowed. |
 | `agent_id` | `"001"` | This endpoint's actual Wazuh agent ID, as a **string preserving leading zeros**. It must equal `alert.agent.id`. Each endpoint needs its own file. |
 | `policy_version` | `"candidate-v1"` | A label for the policy you are testing. Change it when changing decision/timing policy; changing the label alone changes no behaviour. |
 | `verification_seconds` | `3` | Verification deadline, in seconds; accepted range is greater than 0 and at most 10. This is not total attack-to-containment time. |
 | `timeout_policy` | `"thaw"` | Choose explicitly: `thaw` resumes after inconclusive timeout; `review` keeps the process frozen until an analyst acts. The latter has no automatic maximum freeze duration. |
 | `minimum_process_uid` | `1000` | Processes with UID below this are protected. Keep 1000 for the initial lab and run the harmless test workload as a normal user with UID >=1000. This excludes root-run ransomware from automatic process containment. |
 | `critical_asset` | `false` | Set true if this endpoint requires analyst approval before process-tree hard containment. This flag does **not** gate independently triggered isolate/block/disable actions. |
+| `require_approval` | `false` | Optional extra process-containment approval gate, including decoy confirmations. Default false preserves automatic attributed-decoy containment. |
 | `protected_processes` | `sshd`, `systemd`, `ai_rdr_response` | Add essential process **comm names**, not paths, PIDs or command-line arguments. Inspect `/proc/<pid>/comm`. Interpreted programs may appear as `python3`; Linux comm names may be truncated. Do not assume a Python script filename protects it. Protect critical service accounts by UID as well. |
 | `protected_users` | `root`, `wazuh`, `ai-rdr` | Add the VM administrator/recovery account, test controller and other accounts that account restriction must never touch. This list applies to account actions, not process actions. |
 | `state_dir` | `/var/lib/ai-rdr` | Keep this initially; it must be root-only on local writable disk. If changed, create the new directory and pass `--database <new-dir>/aicm.sqlite3` to the case CLI. |
@@ -167,8 +177,11 @@ processes they create. This checks code on your Ubuntu VM, not Wazuh integration
 ## 5. Install the endpoint files
 
 Take a disposable VM snapshot before live response tests. Have a hypervisor console
-available: isolation intentionally cuts ordinary SSH, including existing sessions.
+available: isolation cuts SSH from addresses outside `controller_addresses`, including existing sessions.
 Adding port 22 to `manager_ports` does not create an inbound SSH exception.
+Configure `controller_addresses` and `controller_ssh_port` instead. A laptop outside
+that configured set remains blocked; the exception does not imply that scoped
+remote execution has already been integrated with the central backend.
 
 For an upgrade on the same VM, stop the old worker and prevent M1's response rules
 from dispatching during replacement. Inspect current state first; keep database
@@ -197,7 +210,7 @@ sudoedit /etc/ai-rdr/config.json
 
 Apply the table in section 2, especially manager address, agent ID and protected
 administrator account. Confirm you intentionally chose thaw or review on timeout.
-Validate JSON syntax and install all eleven Python files together:
+Validate JSON syntax and install all twelve Python files together:
 
 ```bash
 sudo /usr/bin/python3 -m json.tool /etc/ai-rdr/config.json >/dev/null
@@ -292,6 +305,7 @@ must provide the fields consumed in `ai_rdr_response.py` and `Workflow.confirmed
 | `data.src_ip` | Block action; this exact field is used, not the stock `srcip` name |
 | `data.username` | Account restriction; this exact field is used, not an arbitrary nested username |
 | `data.model_version` | Optional model version stored with the alert |
+| `data.response_mode` | `alert_only` blocks automatic actions from ML alone; independent attributed decoy evidence may still authorise its response. Omitted retains legacy policy; `automatic` selects normal eligibility checks. Unknown modes are rejected. |
 
 Use JSON integers for process identities and numeric evidence fields. Verify the
 actual decoded payload, because string `"4128"` in evidence does not equal integer
@@ -366,15 +380,15 @@ copying `ai_rdr_aicm.py` onto a manager does not create a central API service.
 |---|---|
 | Agent ID differs from configuration | Actual `alert.agent.id` versus JSON string; leading zeros and which endpoint executed the command |
 | No response although worker is running | Actual manager rule ID, agent routing, `<disabled>`, and Wazuh logs; worker startup does not configure triggers |
-| ModuleNotFoundError | All eleven Python files installed together in the same directory, not only wrappers |
+| ModuleNotFoundError | All twelve Python files installed together in the same directory, including `ai_rdr_policy.py`, not only wrappers |
 | Protected process/account | Process UID/comm guard versus separate fixed account UID guard; use a disposable normal-user workload |
 | Kill rejected | Actual attributed decoy evidence/approval, critical-asset policy and numeric types; do not bypass the guard by changing a risk score |
 | `spwd` import failure | Wazuh wrapper's actual interpreter; use system Python 3.10–3.12 |
 | ip6tables/backend error | VM kernel/backend availability; IPv4-only networking does not eliminate the code's IPv6 backend requirement |
 | Empty case CLI while ARM has cases | Wrong CLI database path; `--database` must match `state_dir` |
 | No new `response.jsonl` | Expected: AICM audit is in SQLite |
-| SSH lost during isolation | Expected: use VM console and case-owned undo |
-| App/dashboard disconnected after isolation | Only loopback and configured manager TCP traffic are allowed; remote M6/TI destinations are not automatically exempted |
+| SSH lost during isolation | Check whether your source IP is in `controller_addresses` and the SSH port matches; use VM console and case-owned undo |
+| App/dashboard disconnected after isolation | Loopback, manager TCP and controller-scoped SSH are allowed; remote HTTP/M6/TI destinations are not automatically exempted |
 
 Reference checked for manager/endpoint placement and location semantics:
 [Wazuh configuration documentation, 4.9 source](https://github.com/wazuh/wazuh-documentation/blob/4.9/source/user-manual/capabilities/active-response/how-to-configure.rst).

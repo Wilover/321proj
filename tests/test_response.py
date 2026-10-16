@@ -305,6 +305,54 @@ class ResponseTests(unittest.TestCase):
         self.assertIn('--sport 1514', flat)
         self.assertIn('--dport 1514', flat)
 
+    def test_controller_ssh_rules_are_scoped_in_both_directions(self):
+        self.r.config['controller_addresses'] = ['192.0.2.63', '2001:db8::63']
+        self.r.config['controller_ssh_port'] = 2222
+        commands = []
+        def run(args, check=True):
+            commands.append(args)
+            class Result:
+                returncode = 1 if '-C' in args else 0
+            return Result()
+        with patch.object(self.r, 'run', side_effect=run):
+            Actions(self.r).firewall('isolate', 'host', True)
+        for peer in self.r.config['controller_addresses']:
+            tool = 'ip6tables' if ':' in peer else 'iptables'
+            self.assertIn([tool, '-w', '1', '-A', 'AI_RDR_ISO_IN', '-s', peer,
+                           '-p', 'tcp', '--dport', '2222', '-j', 'ACCEPT'], commands)
+            self.assertIn([tool, '-w', '1', '-A', 'AI_RDR_ISO_OUT', '-d', peer,
+                           '-p', 'tcp', '--sport', '2222', '-j', 'ACCEPT'], commands)
+        self.assertFalse(any('ESTABLISHED,RELATED' in command for command in commands))
+
+    def test_management_peer_cannot_be_blocked(self):
+        self.r.config['controller_addresses'] = ['192.0.2.63']
+        with patch.object(self.r, 'run') as run:
+            with self.assertRaises(ValueError):
+                Actions(self.r).firewall('block', '192.0.2.63', True)
+            run.assert_not_called()
+
+    def test_bad_management_port_rejected_before_commands(self):
+        self.r.config['manager_ports'] = [True]
+        with patch.object(self.r, 'run') as run:
+            with self.assertRaises(ValueError):
+                Actions(self.r).firewall('isolate', 'host', True)
+            run.assert_not_called()
+
+    def test_rejected_management_block_does_not_leave_pending_resource(self):
+        self.r.config['controller_addresses'] = ['192.0.2.63']
+        with self.assertRaises(ValueError):
+            Actions(self.r).reversible(self.state, 'block', '192.0.2.63', 'C1', True)
+        self.assertEqual(self.state['resources'], {})
+
+    def test_recovery_holds_containment_when_extra_approval_is_enabled(self):
+        record = self.freeze(evidence=self.evidence())
+        record['status'] = 'CONTAINING'
+        self.r.save(self.state)
+        self.r.config['require_approval'] = True
+        self.w.tick(self.state)
+        self.assertEqual(record['status'], 'REVIEW')
+        self.assertNotIn((42, signal.SIGKILL), self.r.signals)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -362,3 +362,47 @@ class ARMIntegrationTests(unittest.TestCase):
         with self.assertRaises(sqlite3.DatabaseError):
             with self.r.transaction():
                 pass
+
+    def test_ml_alert_only_blocks_all_automatic_actions(self):
+        for action in ('freeze', 'kill', 'isolate', 'block', 'disable'):
+            payload = {'command': 'add', 'parameters': {'alert': {'id': 'ML-' + action,
+                'timestamp': '2026-10-16T08:00:00Z', 'agent': {'id': '001'},
+                'data': {'case_id': 'C-' + action, 'pid': 42, 'start_ticks': 100,
+                         'boot_id': 'boot', 'risk_score': .75, 'response_mode': 'alert_only',
+                         'src_ip': '192.0.2.99', 'username': 'labuser'}}}}
+            with patch.object(self.r, 'run', side_effect=AssertionError('No system command allowed')):
+                wazuh(self.r, action, io.StringIO(json.dumps(payload) + '\n{"command":"continue"}\n'), io.StringIO())
+            case = self.r.store.get_case('C-' + action)
+            self.assertEqual(case['operations'], [])
+            self.assertEqual(case['alerts'][0]['response_mode'], 'alert_only')
+            self.assertEqual(self.r.store.timeline('C-' + action)[-1]['event_type'], 'response.policy_blocked')
+        self.assertEqual(self.r.signals, [])
+
+    def test_attributed_decoy_overrides_ml_only_without_a_score(self):
+        payload = {'command': 'add', 'parameters': {'alert': {'id': 'DECOY',
+            'timestamp': '2026-10-16T08:00:00Z', 'agent': {'id': '001'},
+            'data': {'case_id': 'C-DECOY', 'pid': 42, 'start_ticks': 100, 'boot_id': 'boot',
+                     'response_mode': 'alert_only', 'evidence': {'type': 'decoy_write',
+                     'event_id': 'E1', 'pid': 42, 'start_ticks': 100, 'boot_id': 'boot'}}}}}
+        from ai_rdr_actions import Actions
+        with patch.object(Actions, 'firewall'):
+            wazuh(self.r, 'kill', io.StringIO(json.dumps(payload) + '\n{"command":"continue"}\n'), io.StringIO())
+        operation = next(x for x in self.r.store.get_case('C-DECOY')['operations'] if x['kind'] == 'process_tree')
+        self.assertEqual(operation['status'], 'KILLED')
+
+    def test_extra_approval_is_configurable_for_decoy_path(self):
+        self.r.config['require_approval'] = True
+        evidence = {'type': 'decoy_write', 'event_id': 'E1', 'pid': 42,
+                    'start_ticks': 100, 'boot_id': 'boot'}
+        with self.r.transaction() as state:
+            workflow = Workflow(self.r)
+            record = workflow.freeze(state, 'C1', 42, 100, 'boot', None, evidence)
+            workflow.tick(state)
+        self.assertEqual(record['status'], 'REVIEW')
+        self.assertEqual(self.r.identity(42)['state'], 'T')
+
+    def test_direct_workflow_respects_alert_only(self):
+        with self.r.transaction() as state:
+            with self.assertRaises(PermissionError):
+                Workflow(self.r).freeze(state, 'C1', 42, 100, 'boot', .75, response_mode='alert_only')
+        self.assertEqual(self.r.signals, [])

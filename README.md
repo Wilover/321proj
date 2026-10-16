@@ -9,6 +9,11 @@ and an append-only audit trail in SQLite. See [AICM usage](docs/aicm-usage.md) f
 the case CLI, M6 integration contract and migration details, and
 [design research](docs/aicm-research.md) for the source comparisons.
 
+For manually stepped VS Code demonstrations and report evidence, use
+[Four M5 implementation milestones](docs/manual-four-week-tests.md):
+`python3 tools/manual_m5.py week1` (then week2, week3 and week4). Host changes are
+simulated and labeled; `kernel` separately tests only a disposable real child.
+
 ## Development and tests
 
 Use the existing `/workspace/321proj` checkout. No worktree is needed.
@@ -38,8 +43,8 @@ only harmless `sleep` child processes they create. They do not require root.
   from file timestamps or wait for stopped processes to generate fresh events.
 - Positive evidence or root analyst approval is required before killing. Critical
   assets require analyst approval even with decoy evidence. Kill is irreversible.
-- Isolation covers IPv4 and IPv6 INPUT/OUTPUT, allowing loopback and configured
-  manager TCP traffic only. It never allows all established connections. IP blocks
+- Isolation covers IPv4 and IPv6 INPUT/OUTPUT, allowing loopback, configured
+  manager TCP traffic and controller-scoped SSH. It never allows all established connections. IP blocks
   cover both inbound source and outbound destination traffic.
 - Resource leases are keyed by case. One case cannot remove another's isolation,
   block or account restriction. Thaw does not automatically remove network rules.
@@ -51,6 +56,9 @@ only harmless `sleep` child processes they create. They do not require root.
   atomically in SQLite with durable sync, serialized by the endpoint file lock.
   Corrupt state fails closed. Failed firewall mutations retain intent for worker
   reconciliation. Existing JSON state is imported once and retained as an archive.
+- ML `response_mode=alert_only` prevents automatic actions from that signal alone.
+  Independently attributed decoy evidence retains its automatic path; optional
+  `require_approval` adds a process-containment gate alongside `critical_asset`.
 
 ## Detector contract — agree with M1, M2, M3 and M6
 
@@ -92,6 +100,12 @@ explicit `alert_recorded=false` entry. Scores in `[0.60, 0.90)` select the candi
 experimental thresholds. A high score alone does not authorize irreversible kill.
 Decoy evidence may select the kill path without waiting for verification timeout.
 Independent isolation can execute directly from a high-confidence Wazuh rule.
+
+An adapter must forward M2's `response_mode` into `alert.data.response_mode`;
+omitting the field retains the legacy candidate policy. `alert_only` alone records
+the alert/case without mutating the host. A separately attributed `decoy_write`
+retains the automatic path and does not need an ML score. `require_approval=true`
+adds an extra process-containment gate; its default is false.
 
 ## Ubuntu/Wazuh lab deployment
 

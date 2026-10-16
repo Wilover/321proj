@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {"label": "M5: Week 1 response playbooks", "type": "process", "command": "/usr/bin/python3", "args": ["tools/manual_m5.py", "week1"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": [], "presentation": {"reveal": "always", "panel": "dedicated"}},
+    {"label": "M5: Week 2 freeze and verification", "type": "process", "command": "/usr/bin/python3", "args": ["tools/manual_m5.py", "week2"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": [], "presentation": {"reveal": "always", "panel": "dedicated"}},
+    {"label": "M5: Week 3 cases and audit", "type": "process", "command": "/usr/bin/python3", "args": ["tools/manual_m5.py", "week3"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": [], "presentation": {"reveal": "always", "panel": "dedicated"}},
+    {"label": "M5: Week 4 policy and integration checks", "type": "process", "command": "/usr/bin/python3", "args": ["tools/manual_m5.py", "week4"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": [], "presentation": {"reveal": "always", "panel": "dedicated"}},
+    {"label": "M5: Real disposable Linux child", "type": "process", "command": "/usr/bin/python3", "args": ["tools/manual_m5.py", "kernel"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": [], "presentation": {"reveal": "always", "panel": "dedicated"}},
+    {"label": "M5: Regression tests", "type": "process", "command": "/usr/bin/python3", "args": ["-m", "unittest", "discover", "-s", "tests", "-v"], "options": {"cwd": "${workspaceFolder}"}, "problemMatcher": []}
+  ]
+}
