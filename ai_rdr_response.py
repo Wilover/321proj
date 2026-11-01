@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Wazuh newline JSON adapter and privileged local analyst/worker CLI."""
 import argparse
+import datetime as dt
 import json
 import select
 import sys
@@ -33,6 +34,7 @@ def wazuh(runtime, action, incoming=sys.stdin, outgoing=sys.stdout):
     payload = None
     try:
         payload = read_message(incoming)
+        runtime.request_received_ns = time.monotonic_ns()
         return _wazuh(runtime, action, payload, incoming, outgoing)
     except Exception as exc:
         case_id = None
@@ -49,6 +51,29 @@ def wazuh(runtime, action, incoming=sys.stdin, outgoing=sys.stdout):
                                    request_id=runtime.request_id, outcome='failure',
                                    details={'action': action, 'error_type': type(exc).__name__})
         raise
+
+
+def validate_evaluation(runtime, data, case_id):
+    """Fence only explicitly labelled lab requests; normal alerts are unchanged.
+
+    Call under the response lock, immediately before any host mutation. The
+    evaluator closes its unique case under the same lock before cleanup.
+    """
+    evaluation = data.get('evaluation')
+    if evaluation is None:
+        return
+    if (not isinstance(evaluation, dict) or evaluation.get('run_id') != case_id
+            or not case_id.startswith('EVAL-')):
+        raise ValueError('Invalid evaluation identity')
+    from ai_rdr_aicm import timestamp
+    expiry = dt.datetime.fromisoformat(timestamp(evaluation['expires_at']).replace('Z', '+00:00'))
+    if dt.datetime.now(dt.timezone.utc) >= expiry:
+        raise ValueError('Evaluation request expired')
+    with runtime.store.connection() as db:
+        closed = db.execute("SELECT 1 FROM audit_events WHERE case_id=? AND event_type='evaluation.closed' LIMIT 1",
+                            (case_id,)).fetchone()
+    if closed:
+        raise ValueError('Evaluation run is closed')
 
 
 def _wazuh(runtime, action, payload, incoming, outgoing):
@@ -105,7 +130,8 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                              'model_version': data.get('model_version'),
                                              'response_mode': data.get('response_mode'),
                                              'pid': data.get('pid'), 'start_ticks': data.get('start_ticks'),
-                                             'boot_id': data.get('boot_id'), 'evidence': data.get('evidence')},
+                                             'boot_id': data.get('boot_id'), 'evidence': data.get('evidence'),
+                                             **({'evaluation': data['evaluation']} if 'evaluation' in data else {})},
                                    actor=runtime.actor, request_id=runtime.request_id)
     evidence = data.get('evidence')
     if isinstance(evidence, dict) and evidence.get('event_id'):
@@ -121,6 +147,8 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                             'response_mode': data['response_mode']})
         return
     with runtime.transaction() as state:
+        if command == 'add':
+            validate_evaluation(runtime, data, case_id)
         if action in ('freeze', 'kill') and case_id in state['cases']:
             # Existing one-root cases retain their operation and lease identifiers.
             operation_id = case_id
@@ -128,7 +156,9 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                    request_id=runtime.request_id, operation_id=operation_id,
                                    phase='requested', outcome='unknown',
                                    details={'action': action, 'command': command, 'target': target,
-                                            'agent_id': agent_id, 'alert_recorded': source_id is not None})
+                                            'agent_id': agent_id, 'alert_recorded': source_id is not None,
+                                            'received_monotonic_ns': runtime.request_received_ns,
+                                            'boot_id': runtime.boot_id()})
         state['policy'] = {'version': runtime.config.get('policy_version', 'candidate-v1'),
                            'verification_seconds': runtime.config.get('verification_seconds'),
                            'timeout_policy': runtime.config.get('timeout_policy'),

@@ -53,6 +53,8 @@ class Runtime:
 
     def audit(self, action, case_id, status, **details):
         operation_id = details.pop('operation_id', None)
+        details.setdefault('recorded_monotonic_ns', time.monotonic_ns())
+        details.setdefault('boot_id', self.boot_id())
         outcome = 'failure' if status in ('FAILED', 'PARTIAL', 'REJECTED', 'STALE_BOOT') else (
             'unknown' if status == 'REVIEW_REQUIRED' else 'success')
         self.store.append_event(case_id, 'response.' + action, actor=self.actor,

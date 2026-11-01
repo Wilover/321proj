@@ -1,0 +1,39 @@
+{
+  "workload_user": "ai-rdr-eval-writer",
+  "wazuh": {
+    "url": "https://192.168.70.62:55000",
+    "agent_id": "001",
+    "credential_env": "WAZUH_API_TOKEN",
+    "ca_file": "/etc/ai-rdr/wazuh-api-ca.pem"
+  },
+  "files": 1000,
+  "file_bytes": 4096,
+  "seed": 321,
+  "write_interval_seconds": 0.02,
+  "duration_seconds": 15,
+  "trigger_after_seconds": 0.25,
+  "effect_timeout_seconds": 3,
+  "hold_seconds": 0.25,
+  "post_reversal_seconds": 1,
+  "sample_seconds": 0.05,
+  "probe_timeout_seconds": 0.3,
+  "stable_samples": 2,
+  "block_ip": "192.168.70.65",
+  "disposable_account": "ai-rdr-eval-login",
+  "probes": [
+    {
+      "name": "lab-service",
+      "type": "tcp",
+      "role": "restricted",
+      "host": "192.168.70.63",
+      "port": 18080
+    },
+    {
+      "name": "manager-agent-channel",
+      "type": "tcp",
+      "role": "preserved",
+      "host": "192.168.70.62",
+      "port": 1514
+    }
+  ]
+}

@@ -124,6 +124,7 @@ class Workflow:
         return record
 
     def thaw(self, state, case_id, reason, operation_id=None):
+        started = time.monotonic()
         key = self.operation_key(state, case_id, operation_id)
         record = state['cases'][key]
         case_id = record.get('case_id', key)
@@ -152,6 +153,7 @@ class Workflow:
         self.r.save(state)
         self.r.audit('thaw', case_id, 'SUCCESS', reason=reason,
                      operation_id=key,
+                     elapsed_ms=(time.monotonic() - started) * 1000,
                      frozen_seconds=time.monotonic() - record['created_monotonic'])
 
     def contain(self, state, case_id, isolate=True, operation_id=None):
