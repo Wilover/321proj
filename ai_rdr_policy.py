@@ -22,6 +22,7 @@ def attributed_decoy(evidence, process):
         return False
     return bool(
         evidence.get('type') == 'decoy_write'
+        and ('registered' not in evidence or evidence['registered'] is True)
         and isinstance(evidence.get('event_id'), str) and evidence['event_id'].strip()
         and process_identity_valid(process)
         and type(evidence.get('pid')) is int and evidence['pid'] == process['pid']

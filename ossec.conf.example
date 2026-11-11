@@ -2,7 +2,21 @@
      These rule IDs are placeholders: agree actual decoder/rule contracts with M1.
      Scripts execute on the endpoint producing the alert (location=local).
      The freeze worker owns its deadline; do not configure Wazuh timeout for freeze.
-     Isolation has explicit analyst undo; kill cannot be undone. -->
+     Isolation has explicit analyst undo; kill cannot be undone.
+     For scored evidence, route through ai_rdr_fusion (100105 is a placeholder).
+     Do not also route the same event to a standalone action or central responder.
+     Fusion timer delete is unsupported; use explicit case/operation thaw/undo. -->
+<command>
+  <name>ai_rdr_fusion</name>
+  <executable>ai_rdr_fusion.py</executable>
+  <timeout_allowed>no</timeout_allowed>
+</command>
+<active-response>
+  <disabled>no</disabled>
+  <command>ai_rdr_fusion</command>
+  <location>local</location>
+  <rules_id>100105</rules_id>
+</active-response>
 <command>
   <name>ai_rdr_freeze</name>
   <executable>ai_rdr_freeze.py</executable>

@@ -340,7 +340,7 @@ class CaseStore:
         return self.get_case(case_id)
 
     def attach_alert(self, case_id, *, producer, agent_id, source_id, occurred_at,
-                     metadata, actor, request_id=None):
+                     metadata, actor, request_id=None, initial_severity='medium'):
         if not isinstance(metadata, dict):
             raise ValueError('Alert metadata must be an object')
         for value in (producer, agent_id, source_id):
@@ -350,7 +350,7 @@ class CaseStore:
         key = str(uuid.uuid5(uuid.NAMESPACE_URL, encode([producer, agent_id, source_id])))
         fingerprint = hashlib.sha256(encode([when, json.loads(body)]).encode()).hexdigest()
         with self.transaction() as db:
-            self._ensure_case(db, case_id, actor)
+            self._ensure_case(db, case_id, actor, severity=initial_severity)
             existing = db.execute('SELECT fingerprint FROM alerts WHERE alert_key=?', (key,)).fetchone()
             if existing and existing['fingerprint'] != fingerprint:
                 raise Conflict('Source alert ID reused with changed content')
@@ -387,6 +387,49 @@ class CaseStore:
             if case_id is not None:
                 self._ensure_case(db, case_id, actor)
             return self._event(db, case_id, event_type, actor, **attributes)
+
+    def record_risk_decision(self, decision, *, actor, request_id=None):
+        """Commit decision, escalation and outbox together before any OS effects.
+
+        Uses existing append-only events, so existing databases need no migration.
+        Evaluation timestamps do not create another event on an identical retry.
+        """
+        actor = actor_identity(actor)
+        case_id = text_id(decision.get('case_id'), 'Case ID')
+        event_id = text_id(decision.get('decision_id'), 'decision ID')
+        severity = {'unknown': 'low', 'normal': 'low', 'suspicious': 'medium', 'high': 'high'}.get(decision.get('risk_level'))
+        if severity is None:
+            raise ValueError('Invalid risk level')
+        body = redact(decision)
+        with self.transaction() as db:
+            old = db.execute('SELECT case_id,event_type,payload FROM audit_events WHERE event_id=?', (event_id,)).fetchone()
+            if old:
+                if old['case_id'] != case_id or old['event_type'] != 'risk.decided':
+                    raise Conflict('Risk decision ID collides with another event')
+                saved = json.loads(old['payload'])['details']['decision']
+                stable = lambda d: {k: v for k, v in d.items() if k != 'evaluated_at'}
+                if encode(stable(saved)) != encode(stable(body)):
+                    raise Conflict('Risk decision ID reused with different contents')
+                return saved
+            self._ensure_case(db, case_id, actor, severity=severity)
+            row = db.execute('SELECT severity,lifecycle FROM cases WHERE case_id=?', (case_id,)).fetchone()
+            if row['lifecycle'] == 'closed':
+                raise Conflict('Reopen the incident before recording a new risk decision')
+            order = {'low': 0, 'medium': 1, 'high': 2, 'critical': 3}
+            if order[severity] > order[row['severity']]:
+                db.execute('UPDATE cases SET severity=?,version=version+1 WHERE case_id=?', (severity, case_id))
+            self._event(db, case_id, 'risk.decided', actor, event_id=event_id, request_id=request_id,
+                        details={'decision': body, 'severity_before': row['severity'],
+                                 'severity_after': max((severity, row['severity']), key=lambda x: order[x])})
+        return body
+
+    def risk_decision(self, event_id):
+        with self.connection() as db:
+            row = db.execute("SELECT payload FROM audit_events WHERE event_id=? AND event_type='risk.decided'",
+                             (text_id(event_id, 'decision ID'),)).fetchone()
+            if row is None:
+                raise KeyError('Risk decision not recorded')
+            return json.loads(row['payload'])['details']['decision']
 
     def load_state(self):
         with self.connection() as db:

@@ -1,0 +1,27 @@
+{
+  "case_id": "MATRIX-DEMO",
+  "agent_id": "LAB-001",
+  "timestamp": "2026-11-11T10:00:00Z",
+  "pid": 4101,
+  "start_ticks": 410100,
+  "boot_id": "DEMO-BOOT-NOT-A-LIVE-TARGET",
+  "ml": {
+    "ransomware_probability": 0.73,
+    "threshold": 0.13,
+    "prediction": "ransomware",
+    "alert": true,
+    "response_mode": "alert_only",
+    "model_name": "random_forest",
+    "feature_version": "1.0",
+    "inference_ms": 34.1,
+    "explanation": [{"feature": "write_ratio", "value": 0.41, "shap_value": 0.08}]
+  },
+  "honeyfile": {
+    "event_id": "DEMO-M3-1",
+    "decoy_id": "d2",
+    "path": "/srv/test-data/budget.txt",
+    "operation": "WRITE",
+    "timestamp": "2026-11-11T10:00:00Z"
+  },
+  "threat_intel": {"status": "unavailable"}
+}

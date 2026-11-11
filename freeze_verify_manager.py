@@ -40,7 +40,7 @@ class Workflow:
         return candidates[0]
 
     def freeze(self, state, case_id, pid, start_ticks, boot_id, score, evidence=None, operation_id=None,
-               response_mode=None):
+               response_mode=None, risk_decision_id=None):
         if not isinstance(case_id, str) or not case_id or len(case_id) > 128:
             raise ValueError('Explicit Case ID required')
         key = operation_id or case_id
@@ -54,6 +54,19 @@ class Workflow:
             raise ValueError('Stale alert process identity')
         if self.r.protected(root):
             raise ValueError('Protected process')
+        risk = None
+        if risk_decision_id:
+            from ai_rdr_risk import utc
+            import datetime as dt
+            risk = self.r.store.risk_decision(risk_decision_id)
+            if (risk['case_id'] != case_id or risk['agent_id'] != self.r.config.get('agent_id', 'local')
+                    or risk.get('process') != {k: root[k] for k in ('pid', 'start_ticks', 'boot_id')}
+                    or risk.get('action') != 'freeze' or risk.get('risk_level') != 'high'
+                    or risk.get('execution_allowed') is not True):
+                raise ValueError('Risk decision does not authorise this process operation')
+            age = (dt.datetime.now(dt.timezone.utc) - utc(risk['evaluated_at'])).total_seconds()
+            if not -risk['matrix_policy']['future_skew_seconds'] <= age <= risk['matrix_policy']['max_signal_age_seconds']:
+                raise ValueError('Risk decision expired')
         prior = state['cases'].get(key, {})
         decision = response_decision('freeze', supplied, self.r.config, target_identified=True,
                                      analyst_approved=prior.get('analyst_approved') is True)
@@ -73,6 +86,10 @@ class Workflow:
                     raise ValueError('New evidence does not identify the case process')
                 old['evidence'] = evidence
                 self.r.save(state)
+            if risk and old['status'] not in TERMINAL:
+                old['risk_decision_id'] = risk_decision_id
+                old['matrix_requires_review'] = risk['next_step'] == 'review'
+                self.r.save(state)
             return old
         record = {'case_id': case_id, 'operation_id': key,
                   'root': root, 'processes': [], 'status': 'PREPARING',
@@ -80,7 +97,9 @@ class Workflow:
                   'response_mode': response_mode, 'created_monotonic': time.monotonic(),
                   'boot_id': self.r.boot_id(), 'evidence': evidence or {},
                   'response_decision': decision}
-        if not self.confirmed(record) and (score is None or not 0.60 <= float(score) < 0.90):
+        if risk:
+            record.update(risk_decision_id=risk_decision_id, matrix_requires_review=risk['next_step'] == 'review')
+        if not risk and not self.confirmed(record) and (score is None or not 0.60 <= float(score) < 0.90):
             raise ValueError('Outside candidate freeze range without confirming evidence')
         window = float(self.r.config['verification_seconds'])
         if not 0 < window <= 10:
@@ -242,6 +261,12 @@ class Workflow:
                                          reason=next(x['reason'] for x in decisions if not x['execution_allowed']))
                     else:
                         self.contain(state, case_id, operation_id=key)
+                elif record.get('matrix_requires_review'):
+                    if record['status'] != 'REVIEW':
+                        record['status'] = 'REVIEW'
+                        self.r.save(state)
+                        self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
+                                     reason='high_risk_matrix_review')
                 elif time.monotonic() >= record['deadline'] and record['status'] != 'REVIEW':
                     if self.r.config['timeout_policy'] == 'thaw' and not self.confirmed(record):
                         self.thaw(state, case_id, 'inconclusive_timeout', operation_id=key)

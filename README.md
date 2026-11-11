@@ -1,8 +1,9 @@
 # AI-RDR M5
 
-M5 contains Wazuh response playbooks (isolate, kill, block IP, disable account),
-the freeze → verify → contain/thaw workflow, and AICM case records with a SQLite
-audit trail. All twelve runtime Python files stay together because they share imports.
+M5 contains the Risk Matrix, Wazuh response playbooks (isolate, kill, block IP,
+disable account), the freeze → verify → contain/thaw workflow, and AICM case
+records with a SQLite audit trail. All fourteen runtime Python files stay
+together because they share imports.
 
 Use Ubuntu 22.04/24.04 with Python 3.10–3.12 and an enrolled Wazuh agent for live
 responses. No pip dependencies are required. Windows VS Code can connect to the
@@ -68,10 +69,125 @@ mode. The manual demonstrations and local process-check use their own such lab
 configurations. The supplied endpoint example keeps ordinary automatic actions
 disabled; the evaluator does not change installed endpoint policy for you.
 
-### Available upstream inputs for a future risk matrix
+## Risk Matrix
 
-The supplied full-project snapshot contains these interfaces; they are not yet
-a connected multi-source risk matrix in this repository:
+`ai_rdr_risk.py` implements a deterministic, configurable entity scorer. It is
+inspired by Splunk's entity risk contributions and Elastic's entity-risk
+aggregation; it does not copy either vendor's implementation. Scores are
+priorities on 0–100, **not ransomware probabilities**. The supplied weights,
+bands and time windows are prototype policy settings, not calibrated findings.
+No additional trained model or pip package is required.
+
+Default bands: below 30 Normal; 30 to below 70 Suspicious; 70–100 High Risk.
+Missing/invalid/unavailable evidence alone produces Unknown, not Normal.
+The base score is the strongest eligible contribution, plus 20 for each
+additional independent group, capped at 100. M1 monitoring and M2 share the
+`behaviour` group by default: reusing the same telemetry does not earn a bonus.
+Duplicate IDs are collapsed, and conflicting reuse of an ID is rejected.
+
+Scoring is scoped to one endpoint and immutable process identity per bundle.
+An unrelated PID/boot/endpoint is excluded and retained in the explanation;
+the upstream adapter must route it to its own case. Process corroboration
+requires timestamps within the configured window. A PID-free M3 event can be
+a `possible_link`, but cannot increase the identified process's score. Host-only
+or uncorroborated high scores are capped below High Risk unless the explicit
+single-signal policy is enabled. A valid attributed decoy write retains its
+independent high-risk path. Explicit `registered: false` cannot authorize it.
+
+The matrix consumes a normalized evidence **bundle**, not live module services:
+
+* Envelope: `agent_id`, optional `case_id`, and `pid/start_ticks/boot_id` when an
+  upstream adapter reliably identifies the target. Do not extract a PID from
+  `run_id`, a display label, or a window's most frequent process.
+* M2: native `/v1/predict` response under `ml`, or the flat equivalent. Probability,
+  threshold and verdict must agree; an omitted M2 mode defaults to `alert_only`.
+  Do not mix a model response with legacy `risk_score`. A legacy score alone is
+  not a detector input to this matrix; the old standalone lab path is separate.
+* M1: `monitoring` object/list with `event_id`, `rule_level` (0–16),
+  `suspicious` (boolean), UTC `timestamp` and optional `process` identity object.
+* M3: `honeyfile` object/list with decoy/path, operation, optional event ID,
+  endpoint and UTC `timestamp`. Native local display `time` is retained in
+  details but is not used as a UTC clock. Wazuh's event timestamp is the fallback.
+  The separate `evidence` field retains the existing trusted `decoy_write`
+  contract for independently attributed writes.
+* M4: `threat_intel` object/list with `status`. A malicious match additionally
+  needs `malicious: true`, provider, UTC `checked_at`, indicator type (`ip` or
+  `sha256`) and exact indicator value. To corroborate a process it also needs an
+  explicit matching `process` identity supplied by a trusted M1/M2 join. A
+  context-free IOC, no-match, stale result or outage is not a benign verdict.
+
+`source_id`/event IDs, timestamps, full matrix settings, contributions, groups,
+correlation, missing/invalid sources and reasons are included in every result.
+SHAP explains the ML contribution; its features are not counted again as
+independent detectors. `partial_evidence` describes missing usable inputs, not
+the health of remote services or a numerical confidence estimate.
+
+Preview a recorded scenario **without root, SQLite writes, or responses**:
+
+```bash
+python3 ai_rdr_risk.py --input tests/fixtures/risk-matrix-example.json \
+  --matrix config/risk-matrix.example.json --at 2026-11-11T10:00:00Z
+python3 -m unittest discover -s tests -p test_risk_matrix.py -v
+```
+
+The fixture deliberately shows a host/time honeyfile link beside an alert-only
+model. It remains Suspicious/record-only; its demo identity is not a live target.
+Preview output sets execution flags false because no live OS validation occurs.
+
+### Wazuh execution and deployment
+
+`ai_rdr_fusion.py` is the new Wazuh entry point. Use command `ai_rdr_fusion` in
+`ossec.conf.example` (rule 100105 is a placeholder), or the privileged local
+`ai_rdr_response.py wazuh fusion` protocol adapter. Send one immutable source
+alert ID and timezone-aware event timestamp with each evidence bundle. Do not
+dispatch the same event to standalone playbooks or the separate central HTTP
+responder as well. Fusion has no timer delete; use explicit case/operation
+`thaw` or case-owned `undo`.
+
+Normal/Suspicious/Unknown are recorded without containment. High Risk proposes
+the reversible `high_action` (default Freeze; optionally isolate/block/disable
+with a corresponding target). Kill is not a selectable first action. The
+executor independently verifies the target and calls `ai_rdr_policy.py`:
+matrix score cannot override `alert_only`, endpoint action permissions,
+protected targets or approval requirements. Permitted non-decoy high-risk
+freezes wait in REVIEW; they are not automatically killed or timed out as benign.
+Attributed writes use the existing Freeze/Verify/containment workflow.
+Even alternative host/account/IP actions require the scored process to remain
+current. IP blocking additionally requires a fresh same-process IP match;
+account restriction must target the scored process's actual UID.
+
+AICM commits `risk.decided`, severity escalation and its outbox event in one
+transaction before execution. Exact retries reuse the decision; case severity
+is never automatically downgraded. Decisions remain in timeline/export/backup;
+no database schema migration or central M6 connector is needed. Only a recorded,
+matching, unexpired execution decision can bypass the legacy candidate-score
+range inside the Freeze workflow. JSON cannot supply its own decision authority.
+
+Keep all 14 runtime files together on the endpoint. Either configure a `risk_matrix`
+object in `/etc/ai-rdr/config.json`, or remove that object and set
+`"risk_matrix_file": "/etc/ai-rdr/risk-matrix.json"`, installing the example there
+with the same restrictive ownership as the main configuration. Do not configure
+both. Defaults are used when neither is set. The endpoint example supplies the
+matrix version and inherits the prototype defaults. Do not enable ordinary
+automatic actions simply to obtain a higher score; they remain a separate policy.
+
+Optional `benign_guards` require an ID, exact endpoint and SHA256, UTC expiry,
+and optional process/user selectors. Matches are audited; guards do not override
+an attributed decoy write. These selectors depend on trusted upstream metadata
+and need validation before use. The default guard list is empty.
+
+Scenario tests verify policy behaviour, not ransomware detection accuracy.
+The upstream normalization/attribution adapters, M4 provider and M6 transport
+are still external integration dependencies. This scorer does not fetch missing
+signals or resolve process identity independently.
+
+Reference designs: [Splunk detection risk contributions](https://github.com/splunk/security_content/blob/develop/detections/endpoint/deleting_shadow_copies.yml)
+and [Elastic entity risk scoring](https://github.com/elastic/docs-content/blob/main/solutions/security/advanced-entity-analytics/entity-risk-scoring.md).
+
+### Available upstream inputs
+
+The supplied full-project snapshot contains these interfaces. The matrix scores
+their normalized bundles locally; live adapters still need to preserve these boundaries:
 
 | Module | Actual data available | Boundary to preserve |
 | --- | --- | --- |
@@ -123,7 +239,7 @@ after thaw. A brief freeze is not reported as permanent protection.
 ### Live Wazuh endpoint
 
 Run live experiments on the enrolled endpoint VM, with console access. Keep these
-testing files in the source folder. Install the matching twelve runtime files in
+testing files in the source folder. Install the matching fourteen runtime files in
 `/var/ossec/active-response/bin/`, root:wazuh, mode 750; the evaluator checks their
 hashes so an older installed copy cannot silently produce misleading results.
 Pause response dispatch and stop the worker before replacing an existing runtime;

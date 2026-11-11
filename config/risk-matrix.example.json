@@ -1,0 +1,26 @@
+{
+  "version": "m5-risk-matrix-v1",
+  "calibration_status": "prototype-not-calibrated",
+  "bands": {"suspicious": 30, "high": 70},
+  "weights": {
+    "ml": 55,
+    "monitoring": 35,
+    "honeyfile": 55,
+    "threat_intel": 55,
+    "attributed_decoy": 95,
+    "corroboration": 20
+  },
+  "groups": {
+    "ml": "behaviour",
+    "monitoring": "behaviour",
+    "honeyfile": "decoy",
+    "threat_intel": "intelligence"
+  },
+  "correlation_seconds": 5,
+  "max_signal_age_seconds": 30,
+  "threat_intel_max_age_seconds": 900,
+  "future_skew_seconds": 30,
+  "high_action": "freeze",
+  "allow_single_signal": false,
+  "benign_guards": []
+}
