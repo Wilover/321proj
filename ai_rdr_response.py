@@ -9,11 +9,11 @@ import time
 import os
 import uuid
 
-from ai_rdr_common import Runtime
+from ai_rdr_common import Runtime, canonical_ip
 from ai_rdr_actions import Actions
 from freeze_verify_manager import Workflow
 from ai_rdr_aicm import encode, text_id, correlate_case
-from ai_rdr_policy import automatic_allowed
+from ai_rdr_policy import process_identity_valid, response_decision
 
 
 def read_message(stream, timeout=5):
@@ -76,6 +76,41 @@ def validate_evaluation(runtime, data, case_id):
         raise ValueError('Evaluation run is closed')
 
 
+def identify_target(runtime, action, data, agent_id):
+    """Identify the action's entity; do not infer authorization or attribution.
+
+Host isolation identifies an enrolled endpoint, block identifies an IP, disable
+identifies a supported local account. None of these claims a honeyfile PID.
+Process actions additionally verify the immutable identity against the live OS.
+"""
+    if action in ('freeze', 'kill'):
+        if not process_identity_valid(data):
+            return False
+        try:
+            current = runtime.identity(data['pid'])
+            return (all(current[k] == data[k] for k in ('pid', 'start_ticks', 'boot_id'))
+                    and not runtime.protected(current))
+        except (OSError, ValueError):
+            return False
+    if action == 'isolate':
+        return bool(agent_id) and agent_id == str(runtime.config.get('agent_id', 'local'))
+    if action == 'block':
+        if not isinstance(data.get('src_ip'), str):
+            return False
+        try:
+            canonical_ip(data.get('src_ip'))
+            return True
+        except (ValueError, TypeError):
+            return False
+    if action == 'disable':
+        try:
+            Actions(runtime).account_snapshot(data.get('username'))
+            return True
+        except (KeyError, ValueError, TypeError, OSError):
+            return False
+    return False
+
+
 def _wazuh(runtime, action, payload, incoming, outgoing):
     command = payload.get('command')
     if command not in ('add', 'delete'):
@@ -103,8 +138,7 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
     target = {'isolate': 'host', 'block': data.get('src_ip'),
               'disable': data.get('username'), 'freeze': data.get('pid'),
               'kill': data.get('pid')}[action]
-    permitted = command == 'delete' or automatic_allowed(data.get('response_mode'), data.get('evidence'), data)
-    if target is None and permitted:
+    if target is None and command == 'delete':
         raise ValueError('Missing action target')
     if action == 'kill' and command == 'delete':
         raise ValueError('Kill is irreversible')
@@ -131,6 +165,9 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                              'response_mode': data.get('response_mode'),
                                              'pid': data.get('pid'), 'start_ticks': data.get('start_ticks'),
                                              'boot_id': data.get('boot_id'), 'evidence': data.get('evidence'),
+                                             **{key: data[key] for key in ('ml', 'ransomware_probability',
+                                                 'threshold', 'prediction', 'alert', 'model_name',
+                                                 'feature_version', 'inference_ms', 'explanation') if key in data},
                                              **({'evaluation': data['evaluation']} if 'evaluation' in data else {})},
                                    actor=runtime.actor, request_id=runtime.request_id)
     evidence = data.get('evidence')
@@ -139,19 +176,32 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
             evidence_id=str(uuid.uuid5(uuid.NAMESPACE_URL, encode([case_id, agent_id, evidence['event_id']]))),
             kind=evidence['type'], reference='wazuh:' + agent_id + ':' + str(evidence['event_id']),
             metadata=evidence, actor=runtime.actor)
-    if not permitted:
-        runtime.store.append_event(case_id, 'response.policy_blocked', actor=runtime.actor,
-                                   request_id=runtime.request_id, operation_id=operation_id,
-                                   phase='rejected', outcome='unknown',
-                                   details={'action': action, 'reason': 'ml_alert_only',
-                                            'response_mode': data['response_mode']})
-        return
     with runtime.transaction() as state:
         if command == 'add':
             validate_evaluation(runtime, data, case_id)
         if action in ('freeze', 'kill') and case_id in state['cases']:
             # Existing one-root cases retain their operation and lease identifiers.
             operation_id = case_id
+        decision = None
+        if command == 'add':
+            prior = state['cases'].get(operation_id, {}) if operation_id else {}
+            approved = prior.get('analyst_approved') is True
+            identified = identify_target(runtime, action, data, agent_id)
+            decision = response_decision(action, data, runtime.config,
+                                         target_identified=identified,
+                                         analyst_approved=approved,
+                                         process_verified=(identified if action in ('freeze', 'kill') else
+                                             identify_target(runtime, 'freeze', data, agent_id)))
+            runtime.store.append_event(case_id, 'response.policy_evaluated', actor=runtime.actor,
+                                       request_id=runtime.request_id, operation_id=operation_id,
+                                       outcome='unknown', details={**decision, 'target': target,
+                                           'target_kind': {'freeze': 'process', 'kill': 'process',
+                                               'isolate': 'host', 'block': 'ip', 'disable': 'local_account'}[action]})
+            if not decision['execution_allowed']:
+                runtime.store.append_event(case_id, 'response.policy_blocked', actor=runtime.actor,
+                                           request_id=runtime.request_id, operation_id=operation_id,
+                                           phase='rejected', outcome='unknown', details=decision)
+                return
         runtime.store.append_event(case_id, 'response.requested', actor=runtime.actor,
                                    request_id=runtime.request_id, operation_id=operation_id,
                                    phase='requested', outcome='unknown',
@@ -159,11 +209,14 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                                             'agent_id': agent_id, 'alert_recorded': source_id is not None,
                                             'received_monotonic_ns': runtime.request_received_ns,
                                             'boot_id': runtime.boot_id()})
-        state['policy'] = {'version': runtime.config.get('policy_version', 'candidate-v1'),
+        state['policy'] = {'version': runtime.config.get('policy_version', 'response-gates-v2'),
                            'verification_seconds': runtime.config.get('verification_seconds'),
                            'timeout_policy': runtime.config.get('timeout_policy'),
                            'require_approval': runtime.config.get('require_approval', False),
-                           'critical_asset': runtime.config.get('critical_asset', False)}
+                           'critical_asset': runtime.config.get('critical_asset', False),
+                           'automatic_actions': runtime.config.get('automatic_actions', []),
+                           'attributed_decoy_actions': runtime.config.get('attributed_decoy_actions',
+                                                                        ['freeze', 'kill', 'isolate'])}
         workflow = Workflow(runtime)
         runtime.request_started = True
         if action in ('isolate', 'block', 'disable'):
@@ -184,7 +237,7 @@ def _wazuh(runtime, action, payload, incoming, outgoing):
                     raise ValueError('Kill requires positive evidence or prior analyst approval')
             workflow.freeze(state, case_id, int(target), data['start_ticks'], data['boot_id'],
                             data.get('risk_score'), data.get('evidence'), operation_id=operation_id,
-                            response_mode=data.get('response_mode'))
+                            response_mode=decision['response_mode'])
             workflow.tick(state)
 
 

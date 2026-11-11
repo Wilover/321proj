@@ -339,8 +339,12 @@ def live_preflight(settings, action):
     keys = Path('/var/ossec/etc/client.keys').read_text().splitlines()
     if not keys or keys[0].split()[0] != endpoint['agent_id']:
         raise ValueError('Target agent_id must match this machine enrolled in Wazuh')
-    if action == 'kill' and (endpoint.get('require_approval') or endpoint.get('critical_asset')):
-        raise ValueError('This endpoint requires approval; automatic kill evaluation is not eligible')
+    if action in ('kill', 'isolate', 'block', 'disable') and (endpoint.get('require_approval') or endpoint.get('critical_asset')):
+        raise ValueError('This endpoint requires approval; automatic restriction evaluation is not eligible')
+    if action in ('freeze', 'isolate', 'block', 'disable') and action not in endpoint.get('automatic_actions', []):
+        raise ValueError('Explicitly authorise this lab action in endpoint automatic_actions before evaluation')
+    if action == 'kill' and 'kill' not in endpoint.get('attributed_decoy_actions', ['freeze', 'kill', 'isolate']):
+        raise ValueError('The endpoint attributed-decoy policy does not permit this kill evaluation')
     if action in ('freeze', 'kill') and user.pw_uid < endpoint.get('minimum_process_uid', 1000):
         raise ValueError('The workload account is protected by endpoint policy')
     installed = Path('/var/ossec/active-response/bin')
@@ -423,7 +427,7 @@ def evaluate_one(folder, action, settings, mode, repetition=0):
     if runtime is None:
         runtime = OwnedProcessRuntime({'state_dir': str(folder / 'state'), 'agent_id': 'EVAL-LOCAL',
                                        'verification_seconds': 10, 'timeout_policy': 'review',
-                                       'minimum_process_uid': user.pw_uid})
+                                       'minimum_process_uid': user.pw_uid, 'automatic_actions': ['freeze']})
     base_seed = settings['seed']
     settings = settings | {'seed': base_seed + repetition}
     case_id = 'EVAL-' + str(uuid.uuid4())

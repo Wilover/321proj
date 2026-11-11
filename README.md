@@ -30,6 +30,71 @@ automatic process containment by default; `require_approval` or `critical_asset`
 adds a process-containment approval gate. Process alerts require `pid`,
 `start_ticks` and `boot_id`; decoy evidence must match that identity.
 
+### Identification and action permission
+
+M5 computes `target_identified` and `automatic_response_allowed` separately and
+records both in `response.policy_evaluated` / `response.policy_blocked` audit
+events. It executes only when the target is identified and the action is
+permitted. Incoming JSON booleans with these names, or `analyst_approved`, cannot
+grant permission. Process identity is checked against the running process again
+before containment; matching PID fields alone do not prove a honeyfile operation.
+
+`automatic_actions` defaults to `[]`: a known PID, high score, or an
+`automatic` input flag alone does not authorise a new action. Ordinary automatic
+requests require **both** an explicit `response_mode: automatic` and the action
+in this endpoint allowlist. A nested `ml.response_mode: alert_only` takes
+precedence over an outer automatic flag. A PID-free M2/M3 input remains review
+evidence; M5 does not guess an actor from host/time proximity.
+
+The independent attributed-decoy policy is separate:
+`attributed_decoy_actions` defaults to `["freeze", "kill", "isolate"]`.
+Setting it to `[]` disables that automatic path. `require_approval` or
+`critical_asset` blocks automatic termination and standalone network/account
+restrictions; an independently permitted Freeze may still precede analyst
+review. Permission to Freeze is not permission to Kill. Approval is taken only
+from local operation state written by the privileged analyst control.
+
+For standalone playbooks, target identity is action-specific: an enrolled host
+for isolation, a validated IP for blocking, or a supported local account for
+restriction. Identifying these entities does not claim a responsible PID or
+grant permission. A policy using attributed-decoy authority also requires the
+decoy actor's current process identity. Correct case-owned delete/thaw/undo
+remains available when automatic permissions are subsequently disabled.
+
+For an **explicitly authorised disposable lab only**, set
+`automatic_actions` to the actions being exercised, for example
+`["freeze", "isolate", "block", "disable"]`, and send the explicit automatic
+mode. The manual demonstrations and local process-check use their own such lab
+configurations. The supplied endpoint example keeps ordinary automatic actions
+disabled; the evaluator does not change installed endpoint policy for you.
+
+### Available upstream inputs for a future risk matrix
+
+The supplied full-project snapshot contains these interfaces; they are not yet
+a connected multi-source risk matrix in this repository:
+
+| Module | Actual data available | Boundary to preserve |
+| --- | --- | --- |
+| M1 | Deployment config enables auditd watches and Wazuh collection; index mappings declare agent/rule/process and normalized event fields. | Central `backend.irdp` / `backend.risk_fusion` sources are external and absent. A mapping is not proof that a field is populated. Event-time start ticks/boot identity still need an adapter. |
+| M2 | `/v1/predict` returns probability, threshold, prediction, alert, `alert_only`, model/feature version, inference time and top SHAP feature/value contributions. | Response has no PID/agent/window identity. Requests may contain multiple PIDs; do not assign the window score to its most frequent PID. |
+| M3 | Checkpoint 3 exposes decoy ID, path, READ/WRITE/DELETE/RENAME/MOVE operations, flags, display time and details through its Alert/callback. | No PID. CLOSE_WRITE semantics and second-resolution display time are not proof of event-time process attribution. |
+| M4 | Deployment references a cached VirusTotal client; M6 has provisional indicator/type/reputation/source/last-checked/status contracts. | Real provider/normalizer code is not included; M6 values are mocks. Offline/no-match must not be treated as clean. |
+| M6 | Provisional UI confidence, process-label, fusion-summary and response-state fields. | Display-only host matches, mock PIDs and mock action acceptance are neither evidence nor privileged response authorization. |
+
+M2's write/read ratios, event rate, syscall entropy, rename/delete counts and
+process-concentration features are model inputs. Only selected values may appear
+in the top SHAP entries; the API does not return the complete feature vector.
+Offline accuracy/precision/recall and response file-loss/timing measurements are
+evaluation results, not per-incident detector scores to add into a risk matrix.
+
+Index templates also declare `entropy_score`, `anomaly_score`, `confidence_level`,
+`encryption_rate`, `feature_window_seconds`, `predicted_label`, `xforce_score`,
+`lookup_status` and `cache_expiry`. These declarations do not establish working
+producers. In particular, `confidence_level` is a float in normalized events but
+a keyword in the ML index; neither is automatically M2's probability. The
+deployment imports a VirusTotal client while the TI mapping declares
+`xforce_score`. An adapter must resolve these semantics before scoring them.
+
 `systemd/ai-rdr-worker.service` runs the deadline/recovery worker.
 `ossec.conf.example` is a manager-side integration template with placeholder rule
 IDs. Agree the alert payload and rule IDs before enabling it; do not enable a

@@ -29,7 +29,8 @@ class LabRuntime(Runtime):
                           'manager_addresses': ['192.0.2.62'], 'manager_ports': [1514],
                           'controller_addresses': ['192.0.2.63'], 'controller_ssh_port': 22,
                           'verification_seconds': 3, 'timeout_policy': 'thaw',
-                          'protected_users': ['admin'], 'require_approval': False})
+                          'protected_users': ['admin'], 'require_approval': False,
+                          'automatic_actions': ['freeze', 'isolate', 'block', 'disable']})
         self.host = host or LabHost()
         self.emit = emit
 

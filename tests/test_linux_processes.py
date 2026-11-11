@@ -25,7 +25,7 @@ class LinuxProcessTests(unittest.TestCase):
         directory = Path(self.temp.name)
         self.r = Runtime({'state_dir': str(directory), 'audit_log': str(directory / 'audit.jsonl'),
                           'minimum_process_uid': os.getuid(), 'verification_seconds': 3,
-                          'timeout_policy': 'thaw'})
+                          'timeout_policy': 'thaw', 'automatic_actions': ['freeze']})
         self.w = Workflow(self.r)
         self.state = {'resources': {}, 'cases': {}}
         self.identity = self.r.identity(self.child.pid)
@@ -33,7 +33,7 @@ class LinuxProcessTests(unittest.TestCase):
     def freeze(self):
         item = self.identity
         return self.w.freeze(self.state, 'kernel-test', item['pid'], item['start_ticks'],
-                             item['boot_id'], .75)
+                             item['boot_id'], .75, response_mode='automatic')
 
     def test_real_freeze_then_resume(self):
         self.freeze()

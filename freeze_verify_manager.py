@@ -4,7 +4,7 @@ import time
 
 from ai_rdr_actions import Actions
 from ai_rdr_aicm import text_id
-from ai_rdr_policy import attributed_decoy, automatic_allowed
+from ai_rdr_policy import attributed_decoy, process_identity_valid, response_decision
 
 
 TERMINAL = {'THAWED', 'KILLED', 'FAILED', 'STALE_BOOT'}
@@ -45,8 +45,21 @@ class Workflow:
             raise ValueError('Explicit Case ID required')
         key = operation_id or case_id
         text_id(key, 'operation ID')
-        if not automatic_allowed(response_mode, evidence, {'pid': pid, 'start_ticks': start_ticks, 'boot_id': boot_id}):
-            raise PermissionError('ML alert_only does not authorise automatic freeze')
+        supplied = {'pid': pid, 'start_ticks': start_ticks, 'boot_id': boot_id,
+                    'response_mode': response_mode, 'evidence': evidence}
+        if not process_identity_valid(supplied):
+            raise ValueError('Complete typed process identity required')
+        root = self.r.identity(pid)
+        if root['start_ticks'] != start_ticks or root['boot_id'] != boot_id:
+            raise ValueError('Stale alert process identity')
+        if self.r.protected(root):
+            raise ValueError('Protected process')
+        prior = state['cases'].get(key, {})
+        decision = response_decision('freeze', supplied, self.r.config, target_identified=True,
+                                     analyst_approved=prior.get('analyst_approved') is True)
+        if not decision['execution_allowed']:
+            self.r.audit('policy_blocked', case_id, 'REJECTED', operation_id=key, decision=decision)
+            raise PermissionError('Freeze not authorised: ' + decision['reason'])
         if key in state['cases']:
             old = state['cases'][key]
             if old.get('case_id', key) != case_id:
@@ -61,16 +74,12 @@ class Workflow:
                 old['evidence'] = evidence
                 self.r.save(state)
             return old
-        root = self.r.identity(pid)
-        if root['start_ticks'] != int(start_ticks) or root['boot_id'] != boot_id:
-            raise ValueError('Stale alert process identity')
-        if self.r.protected(root):
-            raise ValueError('Protected process')
         record = {'case_id': case_id, 'operation_id': key,
                   'root': root, 'processes': [], 'status': 'PREPARING',
                   'score': float(score) if score is not None else None,
                   'response_mode': response_mode, 'created_monotonic': time.monotonic(),
-                  'boot_id': self.r.boot_id(), 'evidence': evidence or {}}
+                  'boot_id': self.r.boot_id(), 'evidence': evidence or {},
+                  'response_decision': decision}
         if not self.confirmed(record) and (score is None or not 0.60 <= float(score) < 0.90):
             raise ValueError('Outside candidate freeze range without confirming evidence')
         window = float(self.r.config['verification_seconds'])
@@ -168,6 +177,11 @@ class Workflow:
             raise ValueError('Endpoint policy requires explicit analyst approval')
         if not self.confirmed(record):
             raise ValueError('Positive evidence or analyst approval required')
+        decisions = self.containment_decisions(record, isolate)
+        if not all(x['execution_allowed'] for x in decisions):
+            raise ValueError('Containment not authorised: ' + next(
+                x['reason'] for x in decisions if not x['execution_allowed']))
+        record['containment_decisions'] = decisions
         record['status'] = 'CONTAINING'
         record['isolate_requested'] = isolate
         self.r.save(state)
@@ -177,6 +191,22 @@ class Workflow:
         self.actions.kill(record['processes'], case_id, operation_id=key)
         record['status'] = 'KILLED'
         self.r.save(state)
+
+    def containment_decisions(self, record, isolate=True):
+        root = record['root']
+        identified = False
+        if process_identity_valid(root):
+            try:
+                current = self.r.identity(root['pid'])
+                identified = (all(current[k] == root[k] for k in ('pid', 'start_ticks', 'boot_id', 'uid'))
+                              and not self.r.protected(current))
+            except (OSError, ValueError):
+                pass
+        data = dict(root, evidence=record.get('evidence'), response_mode=record.get('response_mode'))
+        return [response_decision(action, data, self.r.config, target_identified=identified,
+                                   analyst_approved=record.get('analyst_approved') is True,
+                                   process_verified=identified)
+                for action in (('kill', 'isolate') if isolate else ('kill',))]
 
     def tick(self, state):
         self.actions.reconcile(state)
@@ -192,20 +222,24 @@ class Workflow:
                 elif record['status'] in ('PREPARING', 'THAWING'):
                     self.thaw(state, case_id, record.get('thaw_reason', 'interrupted_freeze'), operation_id=key)
                 elif record['status'] == 'CONTAINING':
-                    if self.approval_required() and not record.get('analyst_approved'):
+                    decisions = self.containment_decisions(record, record.get('isolate_requested', True))
+                    if not all(x['execution_allowed'] for x in decisions):
                         record['status'] = 'REVIEW'
+                        record['containment_decisions'] = decisions
                         self.r.save(state)
                         self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
-                                     reason='approval_policy_changed_during_recovery')
+                                     reason='response_policy_or_identity_changed_during_recovery')
                     else:
                         self.contain(state, case_id, record.get('isolate_requested', True), operation_id=key)
                 elif self.confirmed(record):
-                    if self.approval_required() and not record.get('analyst_approved'):
+                    decisions = self.containment_decisions(record)
+                    if not all(x['execution_allowed'] for x in decisions):
                         if record['status'] != 'REVIEW':
                             record['status'] = 'REVIEW'
+                            record['containment_decisions'] = decisions
                             self.r.save(state)
                             self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
-                                         reason='approval_policy')
+                                         reason=next(x['reason'] for x in decisions if not x['execution_allowed']))
                     else:
                         self.contain(state, case_id, operation_id=key)
                 elif time.monotonic() >= record['deadline'] and record['status'] != 'REVIEW':

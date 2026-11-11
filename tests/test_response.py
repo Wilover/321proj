@@ -16,7 +16,8 @@ class FakeRuntime(Runtime):
     def __init__(self, directory):
         super().__init__({'state_dir': str(directory), 'audit_log': str(directory / 'audit.jsonl'),
                           'verification_seconds': 3, 'timeout_policy': 'thaw',
-                          'manager_addresses': ['192.0.2.10'], 'manager_ports': [1514]})
+                          'manager_addresses': ['192.0.2.10'], 'manager_ports': [1514],
+                          'automatic_actions': ['freeze', 'isolate', 'block', 'disable']})
         self.processes = {42: {'pid': 42, 'start_ticks': 100, 'boot_id': 'boot',
                               'uid': 1000, 'name': 'work', 'state': 'S', 'ppid': 1}}
         self.signals = []
@@ -52,7 +53,7 @@ class ResponseTests(unittest.TestCase):
         self.w = Workflow(self.r)
 
     def freeze(self, case='C1', evidence=None):
-        return self.w.freeze(self.state, case, 42, 100, 'boot', .75, evidence)
+        return self.w.freeze(self.state, case, 42, 100, 'boot', .75, evidence, response_mode='automatic')
 
     def evidence(self):
         return {'type': 'decoy_write', 'event_id': 'E1', 'pid': 42,
@@ -80,7 +81,7 @@ class ResponseTests(unittest.TestCase):
 
     def test_stale_alert_rejected(self):
         with self.assertRaises(ValueError):
-            self.w.freeze(self.state, 'C1', 42, 101, 'boot', .75)
+            self.w.freeze(self.state, 'C1', 42, 101, 'boot', .75, response_mode='automatic')
         self.assertEqual(self.r.signals, [])
 
     def test_protected_uid_rejected(self):
@@ -194,7 +195,8 @@ class ResponseTests(unittest.TestCase):
 
     def payload(self, command='add'):
         return {'command': command, 'parameters': {'alert': {'data': {'case_id': 'C1',
-                'pid': 42, 'start_ticks': 100, 'boot_id': 'boot', 'risk_score': .75}}}}
+                'pid': 42, 'start_ticks': 100, 'boot_id': 'boot', 'risk_score': .75,
+                'response_mode': 'automatic'}}}}
 
     def test_wazuh_continue_handshake_and_action(self):
         incoming = io.StringIO(json.dumps(self.payload()) + '\n' + '{"command":"continue"}\n')
@@ -235,8 +237,8 @@ class ResponseTests(unittest.TestCase):
 
     def test_direct_unconfirmed_kill_has_no_freeze_side_effect(self):
         incoming = io.StringIO(json.dumps(self.payload()) + '\n' + '{"command":"continue"}\n')
-        with self.assertRaises(ValueError):
-            wazuh(self.r, 'kill', incoming, io.StringIO())
+        wazuh(self.r, 'kill', incoming, io.StringIO())
+        self.assertEqual(self.r.store.timeline('C1')[-1]['details']['reason'], 'positive_evidence_required')
         self.assertEqual(self.r.signals, [])
 
     def test_kill_delete_rejected(self):

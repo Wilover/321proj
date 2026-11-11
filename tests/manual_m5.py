@@ -106,7 +106,7 @@ class Demo:
         timestamp = self.timestamps.setdefault(key, utc_now())
         payload = {'command': command, 'parameters': {'alert': {
             'id': case + ':' + action, 'timestamp': timestamp, 'agent': {'id': 'LAB-001'},
-            'data': {'case_id': case, **data}}}}
+            'data': {'case_id': case, 'response_mode': 'automatic', **data}}}}
         outgoing = io.StringIO()
         incoming = io.StringIO(json.dumps(payload) + '\n' + ('{"command":"continue"}\n' if command == 'add' else ''))
         self.s.say('INPUT: ' + json.dumps(payload))
@@ -191,7 +191,7 @@ class Demo:
             return {'ML_mode': 'alert_only', 'independent_decoy': 'confirmed', 'automatic_kill': 'observed without approval'}
         def approval():
             self.r.config['require_approval'] = True
-            self.send('kill', 'FREEZE-APPROVAL', **self.process_data(4204, decoy=True))
+            self.send('freeze', 'FREEZE-APPROVAL', **self.process_data(4204, decoy=True))
             require(self.r.identity(4204)['state'] == 'T', 'Killed before extra approval')
             return {'additional_gate': 'enabled', 'operation': 'REVIEW', 'process': 'still stopped'}
         def approve():
@@ -314,7 +314,8 @@ class Demo:
 class ChildRuntime(Runtime):
     def __init__(self, directory, emit):
         super().__init__({'state_dir': str(directory), 'verification_seconds': 3,
-                          'timeout_policy': 'thaw', 'minimum_process_uid': os.getuid()})
+                          'timeout_policy': 'thaw', 'minimum_process_uid': os.getuid(),
+                          'automatic_actions': ['freeze']})
         self.children_owned = {}
         self.emit = emit
 
@@ -339,7 +340,8 @@ def real_process_demo(session):
     try:
         def freeze():
             with runtime.transaction() as state:
-                workflow.freeze(state, 'KERNEL-THAW', identity['pid'], identity['start_ticks'], identity['boot_id'], .75)
+                workflow.freeze(state, 'KERNEL-THAW', identity['pid'], identity['start_ticks'], identity['boot_id'], .75,
+                                response_mode='automatic')
             require(runtime.identity(child.pid)['state'] in ('T', 't'), 'Real child did not stop')
             return {'pid': child.pid, 'proc_state': runtime.identity(child.pid)['state']}
         def thaw():
@@ -349,7 +351,8 @@ def real_process_demo(session):
             return {'pid': child.pid, 'proc_state': runtime.identity(child.pid)['state'], 'alive': True}
         def kill():
             with runtime.transaction() as state:
-                record = workflow.freeze(state, 'KERNEL-KILL', identity['pid'], identity['start_ticks'], identity['boot_id'], .75)
+                record = workflow.freeze(state, 'KERNEL-KILL', identity['pid'], identity['start_ticks'], identity['boot_id'], .75,
+                                         response_mode='automatic')
                 record['analyst_approved'] = True
                 record['approval_reason'] = 'Operator requested disposable-child termination test'
                 runtime.save(state)

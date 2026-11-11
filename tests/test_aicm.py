@@ -260,7 +260,8 @@ class ARMIntegrationTests(unittest.TestCase):
     def send(self, pid=42, alert_id='A1', command='add'):
         payload = {'command': command, 'parameters': {'alert': {'id': alert_id,
             'agent': {'id': '001'}, 'timestamp': '2026-10-12T08:00:00Z',
-            'data': {'case_id': 'C1', 'pid': pid, 'start_ticks': 100, 'boot_id': 'boot', 'risk_score': .75}}}}
+            'data': {'case_id': 'C1', 'pid': pid, 'start_ticks': 100, 'boot_id': 'boot',
+                     'risk_score': .75, 'response_mode': 'automatic'}}}}
         incoming = io.StringIO(json.dumps(payload) + '\n' + ('{"command":"continue"}\n' if command == 'add' else ''))
         wazuh(self.r, 'freeze', incoming, io.StringIO())
 
@@ -340,7 +341,8 @@ class ARMIntegrationTests(unittest.TestCase):
     def test_missing_case_id_generates_stable_process_case(self):
         def send(alert_id):
             alert = {'id': alert_id, 'agent': {'id': '001'}, 'timestamp': '2026-10-12T08:00:00Z',
-                     'data': {'pid': 42, 'start_ticks': 100, 'boot_id': 'boot', 'risk_score': .75}}
+                     'data': {'pid': 42, 'start_ticks': 100, 'boot_id': 'boot', 'risk_score': .75,
+                              'response_mode': 'automatic'}}
             payload = {'command': 'add', 'parameters': {'alert': alert}}
             wazuh(self.r, 'freeze', io.StringIO(json.dumps(payload) + '\n{"command":"continue"}\n'), io.StringIO())
         send('A1')
