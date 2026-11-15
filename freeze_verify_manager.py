@@ -40,7 +40,9 @@ class Workflow:
         return candidates[0]
 
     def freeze(self, state, case_id, pid, start_ticks, boot_id, score, evidence=None, operation_id=None,
-               response_mode=None, risk_decision_id=None):
+               response_mode=None, risk_decision_id=None, manual_permission=False, reason=None):
+        if type(manual_permission) is not bool or (manual_permission and (not isinstance(reason, str) or not reason.strip())):
+            raise ValueError('Manual Freeze requires trusted permission and a reason')
         if not isinstance(case_id, str) or not case_id or len(case_id) > 128:
             raise ValueError('Explicit Case ID required')
         key = operation_id or case_id
@@ -69,7 +71,7 @@ class Workflow:
                 raise ValueError('Risk decision expired')
         prior = state['cases'].get(key, {})
         decision = response_decision('freeze', supplied, self.r.config, target_identified=True,
-                                     analyst_approved=prior.get('analyst_approved') is True)
+                                     analyst_approved=manual_permission or prior.get('analyst_approved') is True)
         if not decision['execution_allowed']:
             self.r.audit('policy_blocked', case_id, 'REJECTED', operation_id=key, decision=decision)
             raise PermissionError('Freeze not authorised: ' + decision['reason'])
@@ -90,6 +92,9 @@ class Workflow:
                 old['risk_decision_id'] = risk_decision_id
                 old['matrix_requires_review'] = risk['next_step'] == 'review'
                 self.r.save(state)
+            if manual_permission and old['status'] not in TERMINAL:
+                old.update(manual_review=True, manual_freeze_reason=reason)
+                self.r.save(state)
             return old
         record = {'case_id': case_id, 'operation_id': key,
                   'root': root, 'processes': [], 'status': 'PREPARING',
@@ -97,9 +102,11 @@ class Workflow:
                   'response_mode': response_mode, 'created_monotonic': time.monotonic(),
                   'boot_id': self.r.boot_id(), 'evidence': evidence or {},
                   'response_decision': decision}
+        if manual_permission:
+            record.update(manual_review=True, manual_freeze_reason=reason)
         if risk:
             record.update(risk_decision_id=risk_decision_id, matrix_requires_review=risk['next_step'] == 'review')
-        if not risk and not self.confirmed(record) and (score is None or not 0.60 <= float(score) < 0.90):
+        if not manual_permission and not risk and not self.confirmed(record) and (score is None or not 0.60 <= float(score) < 0.90):
             raise ValueError('Outside candidate freeze range without confirming evidence')
         window = float(self.r.config['verification_seconds'])
         if not 0 < window <= 10:
@@ -184,7 +191,9 @@ class Workflow:
                      elapsed_ms=(time.monotonic() - started) * 1000,
                      frozen_seconds=time.monotonic() - record['created_monotonic'])
 
-    def contain(self, state, case_id, isolate=True, operation_id=None):
+    def contain(self, state, case_id, isolate=True, operation_id=None, manual_permission=False, reason=None):
+        if type(manual_permission) is not bool or (manual_permission and (not isinstance(reason, str) or not reason.strip())):
+            raise ValueError('Manual containment requires trusted permission and a reason')
         key = self.operation_key(state, case_id, operation_id)
         record = state['cases'][key]
         case_id = record.get('case_id', key)
@@ -192,15 +201,19 @@ class Workflow:
             return
         if record['status'] not in ('FROZEN', 'REVIEW', 'CONTAINING'):
             raise ValueError('Case is not eligible for containment')
-        if self.approval_required() and not record.get('analyst_approved'):
+        approved = manual_permission or record.get('analyst_approved') is True
+        if self.approval_required() and not approved:
             raise ValueError('Endpoint policy requires explicit analyst approval')
-        if not self.confirmed(record):
+        if not self.confirmed(record) and not manual_permission:
             raise ValueError('Positive evidence or analyst approval required')
-        decisions = self.containment_decisions(record, isolate)
+        candidate = dict(record, analyst_approved=True) if manual_permission else record
+        decisions = self.containment_decisions(candidate, isolate)
         if not all(x['execution_allowed'] for x in decisions):
             raise ValueError('Containment not authorised: ' + next(
                 x['reason'] for x in decisions if not x['execution_allowed']))
         record['containment_decisions'] = decisions
+        if manual_permission:
+            record.update(analyst_approved=True, approval_reason=reason, manual_review=False)
         record['status'] = 'CONTAINING'
         record['isolate_requested'] = isolate
         self.r.save(state)
@@ -250,6 +263,12 @@ class Workflow:
                                      reason='response_policy_or_identity_changed_during_recovery')
                     else:
                         self.contain(state, case_id, record.get('isolate_requested', True), operation_id=key)
+                elif record.get('manual_review'):
+                    if record['status'] != 'REVIEW':
+                        record['status'] = 'REVIEW'
+                        self.r.save(state)
+                        self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
+                                     reason='explicit_manual_review_hold')
                 elif self.confirmed(record):
                     decisions = self.containment_decisions(record)
                     if not all(x['execution_allowed'] for x in decisions):
@@ -260,7 +279,7 @@ class Workflow:
                             self.r.audit('verify', case_id, 'REVIEW_REQUIRED', operation_id=key,
                                          reason=next(x['reason'] for x in decisions if not x['execution_allowed']))
                     else:
-                        self.contain(state, case_id, operation_id=key)
+                        self.contain(state, case_id, isolate=record.get('isolate_requested', True), operation_id=key)
                 elif record.get('matrix_requires_review'):
                     if record['status'] != 'REVIEW':
                         record['status'] = 'REVIEW'

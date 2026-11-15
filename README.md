@@ -2,7 +2,7 @@
 
 M5 contains the Risk Matrix, Wazuh response playbooks (isolate, kill, block IP,
 disable account), the freeze → verify → contain/thaw workflow, and AICM case
-records with a SQLite audit trail. All fourteen runtime Python files stay
+records with a SQLite audit trail and an authenticated M6 gateway. All fifteen runtime Python files stay
 together because they share imports.
 
 Use Ubuntu 22.04/24.04 with Python 3.10–3.12 and an enrolled Wazuh agent for live
@@ -163,7 +163,7 @@ no database schema migration or central M6 connector is needed. Only a recorded,
 matching, unexpired execution decision can bypass the legacy candidate-score
 range inside the Freeze workflow. JSON cannot supply its own decision authority.
 
-Keep all 14 runtime files together on the endpoint. Either configure a `risk_matrix`
+Keep all 15 runtime files together on the endpoint. Either configure a `risk_matrix`
 object in `/etc/ai-rdr/config.json`, or remove that object and set
 `"risk_matrix_file": "/etc/ai-rdr/risk-matrix.json"`, installing the example there
 with the same restrictive ownership as the main configuration. Do not configure
@@ -177,9 +177,10 @@ an attributed decoy write. These selectors depend on trusted upstream metadata
 and need validation before use. The default guard list is empty.
 
 Scenario tests verify policy behaviour, not ransomware detection accuracy.
-The upstream normalization/attribution adapters, M4 provider and M6 transport
-are still external integration dependencies. This scorer does not fetch missing
-signals or resolve process identity independently.
+The upstream normalization/attribution adapters and M4 provider are still external
+integration dependencies. The M6 gateway below supplies an endpoint/client
+transport; M6 must wire its backend routes and central projection to it. This
+scorer does not fetch missing signals or resolve process identity independently.
 
 Reference designs: [Splunk detection risk contributions](https://github.com/splunk/security_content/blob/develop/detections/endpoint/deleting_shadow_copies.yml)
 and [Elastic entity risk scoring](https://github.com/elastic/docs-content/blob/main/solutions/security/advanced-entity-analytics/entity-risk-scoring.md).
@@ -216,6 +217,161 @@ deployment imports a VirusTotal client while the TI mapping declares
 IDs. Agree the alert payload and rule IDs before enabling it; do not enable a
 second dispatch route alongside the existing central HTTP/SSH responder.
 
+## M6 integration gateway
+
+`ai_rdr_m6.py` provides a one-request JSON gateway on the endpoint and a portable
+`M5Client` / `SSHTransport` for the M6 backend. It does not start another REST
+server. M6 owns its HTTP routes, session authentication, browser authorization
+and central dashboard projection. The client imports only standard-library
+modules; the Linux executor is loaded only on the endpoint.
+
+Transport: M6 backend -> verified SSH host/fixed command -> privileged M5
+gateway -> local AICM/workflow. Every request and response is HMAC-SHA256 signed
+with a provisioned endpoint key. Requests bind issuer, endpoint, principal,
+roles, transport request ID, parameters and UTC expiry. The client uses a 60 s
+lifetime; the endpoint accepts at most 120 s and 30 s of future clock skew.
+Expiry is rechecked after waiting for the response lock and before dispatch.
+The key and principal are backend-only; never derive roles from browser JSON.
+
+### Backend methods and REST mapping
+
+| Client call / gateway method | M6 REST route suggestion | Returns |
+| --- | --- | --- |
+| `list_cases(limit, offset)` | GET `/api/m5/cases` | Endpoint-scoped case rows |
+| `get_case(case_id, limit)` | GET `/api/m5/cases/{id}` | Case lifecycle, latest risk decision, separate process/resource operations |
+| `timeline(case_id, after, limit)` | GET `/api/m5/cases/{id}/timeline` | Ordered events and `next_after` cursor |
+| `risk_decisions(case_id, after, limit)` | GET `/api/m5/cases/{id}/risk-decisions` | `risk.decided` events, including score, reasons and evidence |
+| `request_action(case_id, action, ...)` | POST `/api/m5/cases/{id}/actions` | Durable request ID and execution outcome |
+| `get_action(request_id)` | GET `/api/m5/actions/{id}` | completed / failed / uncertain, actor, executor and result |
+| `outbox(limit)` / `acknowledge(event_ids)` | Internal connector, not a browser endpoint | At-least-once events and acknowledgements |
+| `call('health')` | Backend integration health | Gateway readiness/boot ID; worker health is explicitly unobserved |
+
+Pages are limited to 100 items and responses to 1 MiB. Case projections include
+up to `limit` recent operations with `operation_count` / `operations_truncated`;
+use the timeline for complete historical changes. Source/recording timestamps,
+event IDs, case IDs, operation IDs and decision IDs are preserved. Persisted
+APPLIED resource state is not represented as a continuous network-health probe.
+
+Default roles (override `m6_gateway.role_permissions` on the endpoint if needed):
+
+* `viewer`: reads.
+* `analyst`: reads, Freeze, Verify, Thaw and Undo.
+* `responder`: reads and all manual actions, including Kill and combined containment.
+* `connector`: reads/event delivery; delivery requires a `service` principal.
+
+Manual actions require a signed `user` principal and permission in both its role
+and the endpoint's `m6_gateway.allowed_actions`. They do not enable automatic
+response policy. Protected process/UID and immutable identity checks still apply.
+
+### Action contract and state semantics
+
+Every action requires `reason`, a stable `idempotency_key`, and the
+`expected_sequence` from the case's current `last_sequence`. Refresh on a
+sequence conflict. M5 derives the action request ID from endpoint/principal/key;
+reuse of a key with a different body is rejected. JSON approval flags are not
+accepted. The authenticated analyst is recorded as the event actor; the gateway
+service and local Unix UID are recorded as executor.
+
+| Action | Additional parameters | Effect |
+| --- | --- | --- |
+| `freeze` | `target` with exactly pid/start_ticks/boot_id; optional operation_id | Freeze and hold for manual review, even when ordinary automatic actions are off |
+| `verify` | operation_id when ambiguous | Read current identities/stopped states and evidence; never kill or declare ransomware/benign |
+| `kill` | operation_id when ambiguous | Terminate the identified, already-frozen operation; do not add network isolation |
+| `isolate` | operation_id when ambiguous | Isolate the endpoint associated with a current frozen operation; do not terminate processes |
+| `approve_containment` | operation_id when ambiguous | Explicit combined isolation + termination after Freeze/identity verification |
+| `thaw` | operation_id when ambiguous | Resume owned processes; leave network/account restrictions alone |
+| `undo` | resource_key, for example `isolate:host` | Release only this case's ownership of the selected restriction |
+
+Manual Freeze holds are not automatically terminated when verification time
+expires or decoy evidence is subsequently attached. A signed permitted manual
+action must explicitly authorize termination. Case lifecycle, process state and
+resource state remain separate; never map KILLED to Isolated or THAWED to Benign.
+
+Requests execute synchronously, with durable requested/started/completed/failed
+audit events. `completed` means this action returned verified results at its
+recorded time; Verify's `identity_valid` may still be false. A delivered response
+is not automatically an action success: inspect `status` and `result`. A lost
+completion or interrupted executor produces `uncertain`, never a guessed pass.
+Do not blindly retry effects: a repeated idempotency key returns the recorded
+result, including uncertainty. An explicit Verify/new action requires a refreshed
+case sequence. Failed/uncertain actions may have partial effects or later recovery;
+inspect current operations and their audit history. There is no background job
+queue hidden behind this gateway.
+
+### M6 backend usage
+
+Put the AI-RDR repository root on the backend's Python path (or install the
+client module). M6 supplies `session_user_id` and `server_roles` from its own
+authenticated session and server-side role mapping:
+
+```python
+from pathlib import Path
+from m5.ai_rdr_m6 import M5Client, SSHTransport
+
+client = M5Client(
+    SSHTransport('endpoint.example', 'ai-rdr-m6', '/etc/ai-rdr/m6_ssh_key',
+                 known_hosts_file='/etc/ai-rdr/known_hosts'),
+    Path('/etc/ai-rdr/m6-gateway.key').read_bytes(),
+    agent_id='001',
+    principal={'type': 'user', 'id': session_user_id, 'roles': server_roles},
+)
+case = client.get_case(case_id)
+result = client.request_action(
+    case_id, 'freeze', target=verified_identity_from_m1_or_case,
+    expected_sequence=case['case']['last_sequence'],
+    reason=analyst_reason, idempotency_key=stable_ui_request_key,
+)
+# On a timeout, the backend can calculate/query this ID instead of repeating effects:
+request_id = client.action_id(stable_ui_request_key)
+status = client.get_action(request_id)
+```
+
+`GatewayError.code` supports HTTP mapping: unauthenticated=401, forbidden=403,
+not_found=404, conflict=409, expired=408, bad_request=400,
+unavailable/transport_uncertain=503. A valid response with `status: failed` is
+an execution result, not an HTTP transport failure. Do not return role lists,
+signing keys or raw SSH diagnostics to a browser.
+
+For delivery, use a backend `service` principal with role `connector`. Persist
+received event IDs and the central projection atomically, then acknowledge only
+committed IDs. Retry unacknowledged batches; IDs make duplicates safe. Missing
+events remain pending locally. M6 must implement this delivery loop and its
+central projection; the gateway does not claim a central SQLite copy exists.
+
+### Endpoint deployment
+
+1. Install all **15** matching runtime Python files under
+   `/var/ossec/active-response/bin/`, root:wazuh, mode 750.
+2. Provision at least 32 random key bytes through the deployment/secret channel.
+   The endpoint key must be a root-owned regular file, mode 600, at
+   `/etc/ai-rdr/m6-gateway.key`. The M6 backend receives the same bytes in its
+   own private service configuration. No key is stored in this repository.
+3. Configure a dedicated SSH key/account and pin its host key in the backend's
+   known_hosts. Restrict the authorized key to the fixed command below and grant
+   sudo for exactly that command, without arbitrary command/path arguments:
+
+   ```text
+   /usr/bin/sudo -n /usr/bin/python3 /var/ossec/active-response/bin/ai_rdr_m6.py --config /etc/ai-rdr/config.json
+   ```
+
+   An authorized_keys entry can use `restrict,command="...fixed command..."`.
+   Do not grant a general root shell. `SSHTransport` also sends only this fixed
+   command; the JSON request goes through stdin, never shell interpolation.
+4. Set `m6_gateway.enabled: true` in the endpoint configuration after provisioning;
+   the example defaults to disabled. Keep the deadline/recovery worker running.
+   The gateway itself is a one-shot SSH command; it needs no new public port or
+   systemd web service.
+5. Run the M6 gateway tests, then validate the actual SSH/account setup on a
+   disposable endpoint before connecting browser actions:
+
+   ```bash
+   python3 -m unittest discover -s tests -p test_m6_gateway.py -v
+   ```
+
+Cloud tests use signed local transport and simulated OS effects. They do not
+prove that your VM's SSH account, sudoers, key distribution, M6 authentication
+or browser routes are configured. Those remain deployment/M6 integration work.
+
 ## Response evaluation
 
 `tests/live_evaluate.py` measures generated-file damage, observed response time,
@@ -239,7 +395,7 @@ after thaw. A brief freeze is not reported as permanent protection.
 ### Live Wazuh endpoint
 
 Run live experiments on the enrolled endpoint VM, with console access. Keep these
-testing files in the source folder. Install the matching fourteen runtime files in
+testing files in the source folder. Install the matching fifteen runtime files in
 `/var/ossec/active-response/bin/`, root:wazuh, mode 750; the evaluator checks their
 hashes so an older installed copy cannot silently produce misleading results.
 Pause response dispatch and stop the worker before replacing an existing runtime;

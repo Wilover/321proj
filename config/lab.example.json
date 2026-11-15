@@ -8,6 +8,12 @@
   "automatic_actions": [],
   "attributed_decoy_actions": ["freeze", "kill", "isolate"],
   "risk_matrix": {"version": "m5-risk-matrix-v1"},
+  "m6_gateway": {
+    "enabled": false,
+    "issuer": "m6-backend",
+    "key_file": "/etc/ai-rdr/m6-gateway.key",
+    "allowed_actions": ["freeze", "verify", "kill", "isolate", "thaw", "undo", "approve_containment"]
+  },
   "verification_seconds": 3,
   "timeout_policy": "thaw",
   "minimum_process_uid": 1000,

@@ -431,6 +431,54 @@ class CaseStore:
                 raise KeyError('Risk decision not recorded')
             return json.loads(row['payload'])['details']['decision']
 
+    def begin_analyst_request(self, case_id, request_id, body, *, actor, executor, expected_sequence):
+        """Journal an idempotent manual request; never repeat an uncertain effect."""
+        actor = actor_identity(actor)
+        text_id(request_id, 'request ID')
+        fingerprint = hashlib.sha256(encode(body).encode()).hexdigest()
+        with self.transaction() as db:
+            prior = db.execute('SELECT payload FROM audit_events WHERE event_id=?',
+                               ('m6:' + request_id + ':requested',)).fetchone()
+            if prior:
+                event = json.loads(prior['payload'])
+                if (event['case_id'] != case_id or event['actor'] != actor
+                        or event['details']['fingerprint'] != fingerprint):
+                    raise Conflict('Idempotency key reused with a different action')
+                return False
+            case = db.execute('SELECT lifecycle,last_sequence FROM cases WHERE case_id=?', (case_id,)).fetchone()
+            if case is None:
+                raise KeyError(case_id)
+            if case['lifecycle'] == 'closed':
+                raise Conflict('Reopen the incident before an analyst action')
+            if type(expected_sequence) is not int or case['last_sequence'] != expected_sequence:
+                raise Conflict('Case changed; refresh its timeline before acting')
+            self._event(db, case_id, 'analyst.requested', actor, request_id=request_id,
+                        event_id='m6:' + request_id + ':requested', phase='requested', outcome='unknown',
+                        details={'request': body, 'fingerprint': fingerprint, 'executor': executor})
+        return True
+
+    def analyst_request(self, request_id):
+        text_id(request_id, 'request ID')
+        with self.connection() as db:
+            rows = db.execute('SELECT payload FROM audit_events WHERE event_id IN (?,?,?,?)',
+                              tuple('m6:' + request_id + ':' + phase for phase in
+                                    ('requested', 'started', 'completed', 'failed'))).fetchall()
+        events = {json.loads(row['payload'])['event_type']: json.loads(row['payload']) for row in rows}
+        first = events.get('analyst.requested')
+        if first is None:
+            raise KeyError(request_id)
+        done = events.get('analyst.completed') or events.get('analyst.failed')
+        status = 'completed' if 'analyst.completed' in events else 'failed' if done else 'uncertain'
+        return {'request_id': request_id, 'case_id': first['case_id'],
+                'action': first['details']['request']['action'], 'actor': first['actor'],
+                'executor': first['details']['executor'], 'status': status,
+                'completion_verified': status == 'completed',
+                'last_phase': 'completed' if done else 'started' if 'analyst.started' in events else 'requested',
+                'result': done['details'].get('result') if done else None,
+                'error': done['details'].get('error') if done else None,
+                'may_have_effects': 'analyst.started' in events,
+                'recorded_at': (done or first)['recorded_at']}
+
     def load_state(self):
         with self.connection() as db:
             row = db.execute('SELECT snapshot FROM runtime_state WHERE singleton=1').fetchone()
