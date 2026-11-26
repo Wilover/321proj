@@ -745,7 +745,7 @@ def main():
     local = commands.add_parser('process-check', help='Real files and owned child, local JSON adapter; no manager')
     local.add_argument('--output', type=Path, required=True)
     local.add_argument('--repetitions', type=int, default=1)
-    live = commands.add_parser('run', help='Execute a real Wazuh AR response-stage experiment on this endpoint')
+    live = commands.add_parser('run', help='Run a response-stage experiment in an enrolled legacy Wazuh lab')
     live.add_argument('--config', type=Path, required=True)
     live.add_argument('--action', choices=['baseline', *SCRIPTS], required=True)
     live.add_argument('--output', type=Path, required=True)
