@@ -391,7 +391,7 @@ class M6Gateway:
 
 class SSHTransport:
     """Fixed endpoint command, verified host key, no shell-interpolated request data."""
-    COMMAND = ('sudo -n /usr/bin/python3 /var/ossec/active-response/bin/ai_rdr_m6.py '
+    COMMAND = ('sudo -n /usr/bin/python3 /opt/ai-rdr/m5/ai_rdr_m6.py '
                '--config /etc/ai-rdr/config.json')
 
     def __init__(self, host, user, identity_file, *, port=22, known_hosts_file=None, timeout=45):

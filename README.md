@@ -1,13 +1,13 @@
 # AI-RDR M5
 
-M5 contains the Risk Matrix, Wazuh response playbooks (isolate, kill, block IP,
+M5 contains the Risk Matrix, endpoint response playbooks (isolate, kill, block IP,
 disable account), the freeze → verify → contain/thaw workflow, and AICM case
-records with a SQLite audit trail and an authenticated M6 gateway. All fifteen runtime Python files stay
-together because they share imports.
+records with a SQLite audit trail and an authenticated M6 gateway. Keep the
+fifteen runtime Python files together because they share imports.
 
-Use Ubuntu 22.04/24.04 with Python 3.10–3.12 and an enrolled Wazuh agent for live
-responses. No pip dependencies are required. Windows VS Code can connect to the
-Ubuntu VM through Remote SSH.
+Use Ubuntu 22.04/24.04 with Python 3.10–3.12. The worker and signed SSH gateway
+run independently of Wazuh. No pip dependencies are required. Windows VS Code can
+connect to the Ubuntu VM through Remote SSH.
 
 Run from the project root without sudo:
 
@@ -25,11 +25,40 @@ The three manual tests pause between steps and save outputs under
 kernel tests also use disposable children. These tests do not validate live
 Wazuh dispatch, network connectivity or account login enforcement.
 
-`config/lab.example.json` is an endpoint configuration example; edit its IPs,
-agent ID and protected accounts before use. Attributed decoy evidence permits
-automatic process containment by default; `require_approval` or `critical_asset`
-adds a process-containment approval gate. Process alerts require `pid`,
-`start_ticks` and `boot_id`; decoy evidence must match that identity.
+`config/lab.example.json` is an endpoint configuration example for deployment
+alongside central ARM. Set the controller addresses, endpoint ID and protected
+accounts before use. Both M5 automatic action lists are empty in this profile.
+Process alerts require `pid`, `start_ticks` and `boot_id`; decoy evidence must
+match that identity.
+
+## Falco and ARM deployment
+
+Falco sends events through Falcosidekick and Kafka. Faust combines live ML and
+threat-intelligence evidence and posts detections to ARM. ARM owns live
+playbook selection and approvals. Keep `ossec.conf.example` inactive in this
+deployment. M5's evaluator and protection policy can still be exercised locally.
+
+If deploying M5's endpoint worker or gateway alongside ARM, install the runtime
+under `/opt/ai-rdr/m5/` as described in Endpoint deployment. Leave
+`automatic_actions` and `attributed_decoy_actions` empty so ARM is the sole
+automatic dispatcher. The signed M5 gateway continues to serve case queries
+and analyst actions. Connecting ARM's own playbook execution to M5 requires
+an authenticated execution contract between the two.
+
+For M5 isolation, configure `controller_addresses` and `controller_ssh_port`
+to preserve SSH and undo access. By default, isolated hosts drop Kafka broker
+traffic. If deployment policy calls for continued telemetry during isolation,
+add the actual broker IP and TCP port to `telemetry_peers`. Each entry is an
+object such as `{"address": "192.0.2.67", "port": 9092}`. M5 allows outbound TCP
+to that pair and established replies from it. These exceptions cover host
+INPUT/OUTPUT traffic. Traffic forwarded for bridged containers needs its own
+deployment verification. `manager_addresses` and `manager_ports` are for
+legacy Wazuh profiles.
+
+For an in-place cutover, release active M5 firewall restrictions before
+changing the peer list, since installed chains already contain the old rules.
+Pause dispatch during the switch, preserve `/etc/ai-rdr/config.json` and
+`/var/lib/ai-rdr/`, and restart the worker against the new install path.
 
 ### Identification and action permission
 
@@ -66,8 +95,8 @@ For an **explicitly authorised disposable lab only**, set
 `automatic_actions` to the actions being exercised, for example
 `["freeze", "isolate", "block", "disable"]`, and send the explicit automatic
 mode. The manual demonstrations and local process-check use their own such lab
-configurations. The supplied endpoint example keeps ordinary automatic actions
-disabled; the evaluator does not change installed endpoint policy for you.
+configurations. The supplied endpoint example disables both automatic action
+lists; the evaluator does not change installed endpoint policy for you.
 
 ## Risk Matrix
 
@@ -134,9 +163,9 @@ The fixture deliberately shows a host/time honeyfile link beside an alert-only
 model. It remains Suspicious/record-only; its demo identity is not a live target.
 Preview output sets execution flags false because no live OS validation occurs.
 
-### Wazuh execution and deployment
+### Legacy Wazuh lab execution
 
-`ai_rdr_fusion.py` is the new Wazuh entry point. Use command `ai_rdr_fusion` in
+`ai_rdr_fusion.py` is the legacy Wazuh entry point. Use command `ai_rdr_fusion` in
 `ossec.conf.example` (rule 100105 is a placeholder), or the privileged local
 `ai_rdr_response.py wazuh fusion` protocol adapter. Send one immutable source
 alert ID and timezone-aware event timestamp with each evidence bundle. Do not
@@ -213,9 +242,9 @@ deployment imports a VirusTotal client while the TI mapping declares
 `xforce_score`. An adapter must resolve these semantics before scoring them.
 
 `systemd/ai-rdr-worker.service` runs the deadline/recovery worker.
-`ossec.conf.example` is a manager-side integration template with placeholder rule
-IDs. Agree the alert payload and rule IDs before enabling it; do not enable a
-second dispatch route alongside the existing central HTTP/SSH responder.
+`ossec.conf.example` is a legacy manager-side integration template with
+placeholder rule IDs. Set those IDs and the alert payload contract for a
+dedicated Wazuh lab.
 
 ## M6 integration gateway
 
@@ -341,7 +370,8 @@ central projection; the gateway does not claim a central SQLite copy exists.
 ### Endpoint deployment
 
 1. Install all **15** matching runtime Python files under
-   `/var/ossec/active-response/bin/`, root:wazuh, mode 750.
+   `/opt/ai-rdr/m5/`, root:root, mode 750. Use `systemd/ai-rdr-worker.service`
+   to run the worker from that directory.
 2. Provision at least 32 random key bytes through the deployment/secret channel.
    The endpoint key must be a root-owned regular file, mode 600, at
    `/etc/ai-rdr/m6-gateway.key`. The M6 backend receives the same bytes in its
@@ -351,12 +381,14 @@ central projection; the gateway does not claim a central SQLite copy exists.
    sudo for exactly that command, without arbitrary command/path arguments:
 
    ```text
-   /usr/bin/sudo -n /usr/bin/python3 /var/ossec/active-response/bin/ai_rdr_m6.py --config /etc/ai-rdr/config.json
+   /usr/bin/sudo -n /usr/bin/python3 /opt/ai-rdr/m5/ai_rdr_m6.py --config /etc/ai-rdr/config.json
    ```
 
    An authorized_keys entry can use `restrict,command="...fixed command..."`.
    Do not grant a general root shell. `SSHTransport` also sends only this fixed
    command; the JSON request goes through stdin, never shell interpolation.
+   Roll out the new command together with the M6 client copy, endpoint
+   authorized key, and sudoers rule.
 4. Set `m6_gateway.enabled: true` in the endpoint configuration after provisioning;
    the example defaults to disabled. Keep the deadline/recovery worker running.
    The gateway itself is a one-shot SSH command; it needs no new public port or
@@ -392,12 +424,17 @@ own child, using the local Wazuh JSON adapter and real SQLite storage. It never
 contacts a Wazuh manager or changes firewall/accounts. Final damage includes writes
 after thaw. A brief freeze is not reported as permanent protection.
 
-### Live Wazuh endpoint
+For Falco/ARM acceptance, correlate the observed Detection and ARM action ID
+with approval, the verified endpoint effect, and undo. Measure those intervals
+separately. The evaluator's `run` command below exercises legacy dispatch only.
+
+### Legacy Wazuh endpoint
 
 Run live experiments on the enrolled endpoint VM, with console access. Keep these
 testing files in the source folder. Install the matching fifteen runtime files in
 `/var/ossec/active-response/bin/`, root:wazuh, mode 750; the evaluator checks their
 hashes so an older installed copy cannot silently produce misleading results.
+Install the same runtime at `/opt/ai-rdr/m5/` for the current worker unit.
 Pause response dispatch and stop the worker before replacing an existing runtime;
 preserve `/etc/ai-rdr/config.json` and `/var/lib/ai-rdr/`, then restart the worker.
 

@@ -1,12 +1,11 @@
 {
-  "manager_addresses": ["192.168.70.62"],
-  "manager_ports": [1514],
   "controller_addresses": ["192.168.70.63"],
   "controller_ssh_port": 22,
+  "telemetry_peers": [],
   "agent_id": "001",
   "policy_version": "response-gates-v2",
   "automatic_actions": [],
-  "attributed_decoy_actions": ["freeze", "kill", "isolate"],
+  "attributed_decoy_actions": [],
   "risk_matrix": {"version": "m5-risk-matrix-v1"},
   "m6_gateway": {
     "enabled": false,
@@ -20,7 +19,7 @@
   "critical_asset": false,
   "require_approval": false,
   "protected_processes": ["sshd", "systemd", "ai_rdr_response"],
-  "protected_users": ["root", "wazuh", "ai-rdr"],
+  "protected_users": ["root", "ai-rdr"],
   "state_dir": "/var/lib/ai-rdr",
   "audit_log": "/var/log/ai-rdr/response.jsonl"
 }

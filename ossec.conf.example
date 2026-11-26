@@ -1,4 +1,5 @@
-<!-- Merge into the MANAGER ossec.conf; do not replace existing configuration.
+<!-- Legacy Wazuh lab template. Keep inactive in Falco/Kafka/Faust deployments.
+     Merge into the MANAGER ossec.conf for a legacy lab.
      These rule IDs are placeholders: agree actual decoder/rule contracts with M1.
      Scripts execute on the endpoint producing the alert (location=local).
      The freeze worker owns its deadline; do not configure Wazuh timeout for freeze.

@@ -10,6 +10,7 @@ from ai_rdr_common import Runtime, canonical_ip
 from ai_rdr_actions import Actions
 from ai_rdr_response import wazuh, read_message
 from freeze_verify_manager import Workflow
+from m5_lab_host import LabRuntime
 
 
 class FakeRuntime(Runtime):
@@ -332,6 +333,42 @@ class ResponseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Actions(self.r).firewall('block', '192.0.2.63', True)
             run.assert_not_called()
+
+    def test_isolation_and_undo_without_wazuh(self):
+        runtime = LabRuntime(Path(self.temp.name) / 'falco', lambda message: None)
+        runtime.config.pop('manager_addresses')
+        runtime.config.pop('manager_ports')
+        runtime.config['telemetry_peers'] = [{'address': '192.0.2.67', 'port': 9092}]
+        actions = Actions(runtime)
+        original = runtime.snapshot()['firewall']
+        actions.reversible(self.state, 'isolate', 'host', 'C1', True)
+        table = runtime.host.tables['iptables']
+        self.assertIn(['-s', '192.0.2.63', '-p', 'tcp', '--dport', '22', '-j', 'ACCEPT'],
+                      table['AI_RDR_ISO_IN'])
+        self.assertIn(['-d', '192.0.2.67', '-p', 'tcp', '--dport', '9092', '-j', 'ACCEPT'],
+                      table['AI_RDR_ISO_OUT'])
+        self.assertIn(['-s', '192.0.2.67', '-p', 'tcp', '--sport', '9092',
+                       '-m', 'conntrack', '--ctstate', 'ESTABLISHED', '-j', 'ACCEPT'],
+                      table['AI_RDR_ISO_IN'])
+        for chain in ('AI_RDR_ISO_IN', 'AI_RDR_ISO_OUT'):
+            self.assertEqual(table[chain][-1], ['-j', 'DROP'])
+            self.assertFalse(any('1514' in rule for rule in table[chain]))
+        with self.assertRaises(ValueError):
+            actions.reversible(self.state, 'block', '192.0.2.67', 'C1', True)
+        self.assertNotIn('block:192.0.2.67', self.state['resources'])
+
+        runtime.config.pop('controller_addresses')
+        runtime.config['telemetry_peers'] = []
+        actions.reversible(self.state, 'isolate', 'host', 'C1', False)
+        self.assertEqual(self.state['resources'], {})
+        self.assertEqual(runtime.host.tables, original)
+
+    def test_isolation_with_telemetry_but_no_control_peer_is_rejected_before_intent(self):
+        self.r.config.pop('manager_addresses')
+        self.r.config['telemetry_peers'] = [{'address': '2001:db8::67', 'port': 9092}]
+        with self.assertRaisesRegex(ValueError, 'Configure a controller address'):
+            Actions(self.r).reversible(self.state, 'isolate', 'host', 'C1', True)
+        self.assertEqual(self.state['resources'], {})
 
     def test_bad_management_port_rejected_before_commands(self):
         self.r.config['manager_ports'] = [True]
